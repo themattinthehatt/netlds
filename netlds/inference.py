@@ -610,8 +610,7 @@ class MeanFieldGaussian(InferenceNetwork):
 
         # construct data pipeline
         with tf.variable_scope('inference_input'):
-            self.input_ph = [None, None]
-            self.input_ph[0] = tf.placeholder(
+            self.input_ph = tf.placeholder(
                 dtype=self.dtype,
                 shape=[None, self.num_time_pts, self.dim_input],
                 name='obs_in_ph')
@@ -684,23 +683,22 @@ class MeanFieldGaussian(InferenceNetwork):
 
         return entropy
 
-    def generate_samples(self, sess, num_samples):
+    def generate_samples(self, sess, observations):
         """
         Draw samples from approximate posterior
 
         Args:
             sess (tf.Session object)
-            num_samples (int)
+            observations (num_samples x num_time_pts x num_inputs numpy array)
 
         Returns:
-            z (num_samples x num_time_pts x dim_latent numpy array)
+            num_samples x num_time_pts x dim_latent numpy array
 
         """
 
-        z = sess.run(
-            self.post_z_samples, feed_dict={self.num_samples_ph, num_samples})
+        feed_dict = {self.input_ph: observations}
 
-        return z
+        return sess.run(self.post_z_samples, feed_dict=feed_dict)
 
     def get_posterior_means(self, sess, observations):
         """Get posterior means conditioned on observations"""

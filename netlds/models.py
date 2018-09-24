@@ -24,6 +24,8 @@ class Model(object):
             gen_model (GenerativeModel class)
             gen_model_params (dict)
             dtype (tf.Dtype)
+            np_seed (int): for training minibatches
+            tf_seed (int): for initializing tf.Variables and sampling
 
         """
 
@@ -41,8 +43,8 @@ class Model(object):
         self.merge_summaries = None
         self.init = None
         self.sess_config = None
-        self.np_seed = np_seed  # for training minibatches
-        self.tf_seed = tf_seed  # for initializing tf.Variables
+        self.np_seed = np_seed
+        self.tf_seed = tf_seed
 
         # save constructor inputs for easy save/load
         constructor_inputs = {
@@ -253,6 +255,8 @@ class Model(object):
             early_stop_params = None
 
         num_batches = train_indxs.shape[0] // batch_size
+
+        np.random.seed(self.np_seed)
 
         # start training loop
         for epoch in range(epochs_training):
@@ -978,13 +982,13 @@ class DynamicalModel(Model):
         if batch_indxs is not None:
             feed_dict = {
                 self.gen_net.obs_ph:
-                    np.squeeze(observations[batch_indxs, :, :]),
+                    observations[batch_indxs, :, :],
                 self.inf_net.input_ph:
-                    np.squeeze(observations[batch_indxs, :, :])}
+                    observations[batch_indxs, :, :]}
         else:
             feed_dict = {
-                self.gen_net.obs_ph: np.squeeze(observations),
-                self.inf_net.input_ph: np.squeeze(observations)}
+                self.gen_net.obs_ph: observations,
+                self.inf_net.input_ph: observations}
 
         return feed_dict
 
@@ -1037,7 +1041,6 @@ class LDSCoupledModel(DynamicalModel):
         # build model graph
         with self.graph.as_default():
 
-            np.random.seed(self.tf_seed)
             tf.set_random_seed(self.tf_seed)
 
             with tf.variable_scope('shared_vars'):
@@ -1111,7 +1114,6 @@ class LDSModel(DynamicalModel):
         # build model graph
         with self.graph.as_default():
 
-            np.random.seed(self.tf_seed)
             tf.set_random_seed(self.tf_seed)
 
             with tf.variable_scope('inference_network'):

@@ -142,7 +142,7 @@ class LDS(GenerativeModel):
             self.A = tf.get_variable(
                 'A',
                 initializer=0.5 * np.eye(self.dim_latent,
-                                         dtype=self.dtype.as_numpy_dtype()),
+                                         dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
         # square root of the innovation precision matrix
@@ -161,7 +161,7 @@ class LDS(GenerativeModel):
                 'Q_sqrt',
                 initializer=0.1 * np.eye(
                     self.dim_latent,
-                    dtype=self.dtype.as_numpy_dtype()),
+                    dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
         # square root of the initial innovation precision matrix
@@ -180,13 +180,17 @@ class LDS(GenerativeModel):
                 'Q0_sqrt',
                 initializer=0.1 * np.eye(
                     self.dim_latent,
-                    dtype=self.dtype.as_numpy_dtype()),
+                    dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
+        diag = 1e-6 * np.eye(self.dim_latent,
+                             dtype=self.dtype.as_numpy_dtype)
+
         self.Q0 = tf.matmul(
-            self.Q0_sqrt, self.Q0_sqrt, transpose_b=True, name='Q0')
+            self.Q0_sqrt, self.Q0_sqrt, transpose_b=True, name='Q0') + diag
         self.Q = tf.matmul(
-            self.Q_sqrt, self.Q_sqrt, transpose_b=True, name='Q')
+            self.Q_sqrt, self.Q_sqrt, transpose_b=True, name='Q') + diag
+
         self.Q0inv = tf.matrix_inverse(self.Q0, name='Q0inv')
         self.Qinv = tf.matrix_inverse(self.Q, name='Qinv')
 
@@ -222,6 +226,16 @@ class LDS(GenerativeModel):
         self.Rinv = 1.0 / self.R
 
         # observation matrix
+        # self.mapping = tf.layers.Dense(
+        #     units=self.dim_obs,
+        #     activation=None,
+        #     use_bias=True,
+        #     kernel_initializer=kernel_initializer,
+        #     bias_initializer=bias_initializer,
+        #     kernel_regularizer=kernel_regularizer,
+        #     bias_regularizer=bias_regularizer,
+        #     name='mapping')
+
         if 'C' in self.gen_params:
             self.C = tf.get_variable(
                 'C',
@@ -249,8 +263,8 @@ class LDS(GenerativeModel):
 
     def _apply_mapping(self, z_samples):
         """Apply model mapping from latent space to observations"""
-        # return tf.add(tf.matmul(z_samples, self.C), self.d)
         return tf.add(tf.tensordot(z_samples, self.C, axes=[[2], [0]]), self.d)
+        # return self.mapping.apply(z_samples)
 
     def _sample_yz(self):
         """
@@ -348,6 +362,9 @@ class LDS(GenerativeModel):
                 + (self.num_time_pts-1) * tf.log(tf.matrix_determinant(self.Q))
                 + tf.log(tf.matrix_determinant(self.Q0))
                 + self.num_time_pts * self.dim_latent * tf.log(2.0 * np.pi))
+
+        # tf.summary.scalar('mat_det_Q0', tf.matrix_determinant(self.Q0))
+        # tf.summary.scalar('mat_det_Q', tf.matrix_determinant(self.Q))
 
         return self.log_density_y + self.log_density_z
 
