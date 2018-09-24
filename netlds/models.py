@@ -480,7 +480,7 @@ class Model(object):
         """Generates feed dict for training and other evaluation functions"""
         raise NotImplementedError
 
-    def generate_samples(
+    def sample(
             self, ztype='prior', num_samples=1, checkpoint_file=None):
         """
         Generate samples from prior/posterior and model
@@ -489,9 +489,9 @@ class Model(object):
             ztype (str): distribution used for latent state samples
                 'prior' | 'posterior'
             num_samples (int, optional)
-            checkpoint_file (str, optional): location of checkpoint file specifying
-                model from which to generate samples; if `None`, will then look
-                for a checkpoint file created upon model initialization
+            checkpoint_file (str, optional): checkpoint file specifying model
+                from which to generate samples; if `None`, will then look for a
+                checkpoint file created upon model initialization
 
         Returns:
             num_time_pts x dim_obs x num_samples numpy array: y
@@ -506,7 +506,7 @@ class Model(object):
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             if ztype is 'prior':
-                y, z = self.gen_net.generate_samples(sess, num_samples)
+                y, z = self.gen_net.sample(sess, num_samples)
             elif ztype is 'posterior':
                 # TODO: needs data input as well
                 y = None
@@ -884,12 +884,12 @@ class DynamicalModel(Model):
 
         # expected value of log joint distribution
         with tf.variable_scope('log_joint'):
-            self.log_joint = self.gen_net.evaluate_log_density(
+            self.log_joint = self.gen_net.log_density(
                 self.gen_net.y_pred, self.inf_net.post_z_samples)
 
         # entropy of approximate posterior
         with tf.variable_scope('entropy'):
-            self.entropy = self.inf_net.evaluate_entropy()
+            self.entropy = self.inf_net.entropy()
 
         # objective to minimize
         self.objective = -self.log_joint - self.entropy

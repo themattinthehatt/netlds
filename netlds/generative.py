@@ -40,7 +40,7 @@ class GenerativeModel(object):
         """Build tensorflow computation graph for generative model"""
         raise NotImplementedError
 
-    def evaluate_log_density(self, y, z):
+    def log_density(self, y, z):
         """Evaluate log density of generative model"""
         raise NotImplementedError
 
@@ -48,7 +48,7 @@ class GenerativeModel(object):
         """Get parameters of generative model"""
         raise NotImplementedError
 
-    def generate_samples(self, sess, num_samples=1):
+    def sample(self, sess, num_samples=1):
         """Draw samples from model"""
         raise NotImplementedError
 
@@ -321,7 +321,7 @@ class LDS(GenerativeModel):
         self.y_samples_prior = tf.concat(
             [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
 
-    def evaluate_log_density(self, y, z):
+    def log_density(self, y, z):
         """
         Evaluate log density for generative model, defined as
         p(y, z) = p(y | z) p(z)
@@ -368,7 +368,7 @@ class LDS(GenerativeModel):
 
         return self.log_density_y + self.log_density_z
 
-    def generate_samples(self, sess, num_samples=1):
+    def sample(self, sess, num_samples=1):
         """
         Generate samples from the model
 
