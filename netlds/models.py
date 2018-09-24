@@ -490,8 +490,8 @@ class Model(object):
                 for a checkpoint file created upon model initialization
 
         Returns:
-            y (T x dim_obs x num_samples numpy array)
-            z (T x dim_latent x num_samples numpy array)
+            num_time_pts x dim_obs x num_samples numpy array: y
+            num_time_pts x dim_latent x num_samples numpy array: z
 
         Raises:
             ValueError: for incorrect `ztype` values
@@ -975,22 +975,16 @@ class DynamicalModel(Model):
             self, observations=None, input_data=None, batch_indxs=None):
         """Generates feed dict for training and other evaluation functions"""
 
-        # sample gaussians for continuous lvs of latent states
-        samples_z = self.inf_net.random_samples(num_samples=len(batch_indxs))
-
         if batch_indxs is not None:
             feed_dict = {
                 self.gen_net.obs_ph:
                     np.squeeze(observations[batch_indxs, :, :]),
-                self.inf_net.input_ph[0]:
-                    np.squeeze(observations[batch_indxs, :, :]),
-                self.inf_net.input_ph[1]:
-                    samples_z}
+                self.inf_net.input_ph:
+                    np.squeeze(observations[batch_indxs, :, :])}
         else:
             feed_dict = {
                 self.gen_net.obs_ph: np.squeeze(observations),
-                self.inf_net.input_ph[0]: np.squeeze(observations),
-                self.inf_net.input_ph[1]: samples_z}
+                self.inf_net.input_ph: np.squeeze(observations)}
 
         return feed_dict
 

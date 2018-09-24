@@ -258,15 +258,16 @@ class LDS(GenerativeModel):
         prior
         """
 
-        self.rand_ph = tf.placeholder(
-            dtype=self.dtype,
-            shape=[None, self.num_time_pts, self.dim_latent],
-            name='rand_ph')
+        self.num_samples_ph = tf.placeholder(
+            dtype=tf.int32, shape=None, name='num_samples_ph')
 
-        self.obs_noise_ph = tf.placeholder(
-            dtype=self.dtype,
-            shape=[None, self.num_time_pts, self.dim_obs],
-            name='obs_noise_ph')
+        self.latent_rand_samples = tf.random_normal(
+            shape=[self.num_samples_ph, self.num_time_pts, self.dim_latent],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='latent_rand_samples')
+
+        self.obs_rand_samples = tf.random_normal(
+            shape=[self.num_samples_ph, self.num_time_pts, self.dim_obs],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='obs_rand_samples')
 
         def lds_update(outputs, inputs):
 
@@ -282,16 +283,17 @@ class LDS(GenerativeModel):
             return [z_val, y_val]
 
         z0 = self.z0_mean \
-            + tf.matmul(self.rand_ph[:, 0, :], tf.transpose(self.Q0_sqrt))
+            + tf.matmul(self.latent_rand_samples[:, 0, :],
+                        tf.transpose(self.Q0_sqrt))
         y0 = tf.squeeze(
             self._apply_mapping(tf.expand_dims(z0, axis=1)), axis=1) \
-            + tf.multiply(self.obs_noise_ph[:, 0, :], self.Rsqrt)
+            + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
 
         # scan over time points, not samples
         rand_ph_shuff = tf.transpose(
-            self.rand_ph[:, 1:, :], perm=[1, 0, 2])
+            self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
         obs_noise_ph_shuff = tf.transpose(
-            self.obs_noise_ph[:, 1:, :], perm=[1, 0, 2])
+            self.obs_rand_samples[:, 1:, :], perm=[1, 0, 2])
         samples = tf.scan(
             fn=lds_update,
             elems=[rand_ph_shuff, obs_noise_ph_shuff],
@@ -359,29 +361,15 @@ class LDS(GenerativeModel):
 
         Returns:
             num_time_pts x dim_obs x num_samples numpy array:
-                sample observations
+                sample observations y
             num_time_pts x dim_latent x num_samples numpy array:
-                sample latent states
+                sample latent states z
 
         """
+
         [y, z] = sess.run(
             [self.y_samples_prior, self.z_samples_prior],
-            feed_dict={
-                self.obs_noise_ph:
-                    self.random_samples('obs', num_samples=num_samples),
-                self.rand_ph:
-                    self.random_samples('latent', num_samples=num_samples)})
-
-        # y = np.zeros(shape=(num_samples, self.num_time_pts, self.dim_obs))
-        # z = np.zeros(shape=(num_samples, self.num_time_pts, self.dim_latent))
-        #
-        # for sample in range(num_samples):
-        #
-        #     [y[sample, :, :], z[sample, :, :]] = sess.run(
-        #         [self.y_samples_prior, self.z_samples_prior],
-        #         feed_dict={
-        #             self.obs_noise_ph: self.random_samples('obs'),
-        #             self.rand_ph: self.random_samples('latent')})
+            feed_dict={self.num_samples_ph: num_samples})
 
         return y, z
 
@@ -397,21 +385,6 @@ class LDS(GenerativeModel):
             'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
 
         return param_dict
-
-    def random_samples(self, sample_type=None, num_samples=1):
-        if sample_type is 'latent':
-            dim_sample = self.dim_latent
-        elif sample_type is 'obs':
-            dim_sample = self.dim_obs
-        else:
-            raise ValueError
-
-        samples = np.random.normal(
-            loc=0.0, scale=1.0,
-            size=(num_samples, self.num_time_pts, dim_sample)) \
-            .astype(self.dtype.as_numpy_dtype())
-
-        return samples
 
 
 class LDSCoupled(LDS):
