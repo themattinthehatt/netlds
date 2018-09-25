@@ -16,8 +16,9 @@ class GenerativeModel(object):
         Args:
             dim_obs (int): dimension of observation vector
             dim_latent (int): dimension of latent state
-            post_z_samples (T x dim_latent tf Tensor): samples from the (appx)
-                posterior of the latent states
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
             rng (int): rng seed for generating samples of observations
             dtype (tf.Dtype): data type for all model variables, placeholders
 
@@ -26,7 +27,7 @@ class GenerativeModel(object):
         # set basic dims
         self.dim_latent = dim_latent
         self.dim_obs = dim_obs
-        # tf Tensor that contains samples from the approximate posterior
+        # tf.Tensor that contains samples from the approximate posterior
         # (output of inference network)
         self.post_z_samples = post_z_samples
         # set rng seed for drawing samples from observation distribution
@@ -86,8 +87,8 @@ class LDS(GenerativeModel):
         Build tensorflow computation graph for generative model
 
         Args:
-            z_samples (num_time_pts x dim_latent tf.Tensor): samples of the
-                latent states
+            z_samples (batch_size x num_mc_samples x num_time_pts x dim_latent
+                tf.Tensor): samples of the latent states
 
         """
 
@@ -263,7 +264,7 @@ class LDS(GenerativeModel):
 
     def _apply_mapping(self, z_samples):
         """Apply model mapping from latent space to observations"""
-        return tf.add(tf.tensordot(z_samples, self.C, axes=[[2], [0]]), self.d)
+        return tf.add(tf.tensordot(z_samples, self.C, axes=[[3], [0]]), self.d)
         # return self.mapping.apply(z_samples)
 
     def _sample_yz(self):
@@ -290,17 +291,21 @@ class LDS(GenerativeModel):
 
             z_val = tf.matmul(z_val, tf.transpose(self.A)) \
                 + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
+            # expand dims to account for time and mc dims when applying mapping
+            expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1), axis=1)
             y_val = tf.squeeze(
-                self._apply_mapping(tf.expand_dims(z_val, axis=1)), axis=1) \
+                self._apply_mapping(expanded_z), axis=[1, 2]) \
                 + tf.multiply(rand_y, self.Rsqrt)
 
             return [z_val, y_val]
 
+        # calculate samples for first time point
         z0 = self.z0_mean \
             + tf.matmul(self.latent_rand_samples[:, 0, :],
                         tf.transpose(self.Q0_sqrt))
-        y0 = tf.squeeze(
-            self._apply_mapping(tf.expand_dims(z0, axis=1)), axis=1) \
+        # expand dims to account for time and mc dims when applying mapping
+        expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
+        y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2]) \
             + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
 
         # scan over time points, not samples
@@ -330,35 +335,48 @@ class LDS(GenerativeModel):
         p(y | z) = \prod_t p(y_t | z_t), y_t | z_t ~ N(C z_t + d, R)
 
         Args:
-            y (num_samples x num_time_pts x dim_obs tf.Tensor)
-            z (num_samples x num_time_pts x dim_latent tf.Tensor)
+            y (batch_size x num_mc_samples x num_time_pts x dim_obs tf.Tensor)
+            z (batch_size x num_mc_samples x num_time_pts x dim_latent
+                tf.Tensor)
 
         Returns:
             float: log density over y and z, averaged over minibatch samples
+                and monte carlo samples
 
         """
 
         # likelihood
         with tf.variable_scope('likelihood'):
-            self.res_y = self.obs_ph - y
-            self.log_density_y = -0.5 * (
-                tf.reduce_sum(tf.reduce_mean(
-                    tf.multiply(tf.square(self.res_y), self.Rinv), axis=0))
+            # expand observation dims over mc samples
+            self.res_y = tf.expand_dims(self.obs_ph, axis=1) - y
+
+            # average over batch and mc sample dimensions
+            res_y_Rinv_res_y = tf.reduce_mean(
+                tf.multiply(tf.square(self.res_y), self.Rinv), axis=[0, 1])
+
+            # sum over time and observation dimensions
+            self.log_density_y = -0.5 * (tf.reduce_sum(res_y_Rinv_res_y)
                 + self.num_time_pts * tf.reduce_sum(tf.log(self.R))
                 + self.num_time_pts * self.dim_obs * tf.log(2.0 * np.pi))
 
         # prior
         with tf.variable_scope('prior'):
-            self.res_z0 = z[:, 0, :] - self.z0_mean
-            self.res_z = z[:, 1:, :] \
-                - tf.tensordot(z[:, :-1, :], tf.transpose(self.A),
-                               axes=[[2], [0]])
-            self.log_density_z = -0.5 * (
-                tf.reduce_sum(tf.reduce_mean(tf.multiply(
-                    tf.tensordot(self.res_z, self.Qinv, axes=[[2], [0]]),
-                    self.res_z), axis=0))
-                + tf.reduce_sum(tf.reduce_mean(tf.multiply(
-                    tf.matmul(self.res_z0, self.Q0inv), self.res_z0), axis=0))
+            self.res_z0 = z[:, :, 0, :] - self.z0_mean
+            self.res_z = z[:, :, 1:, :] \
+                - tf.tensordot(z[:, :, :-1, :], tf.transpose(self.A),
+                               axes=[[3], [0]])
+
+            # average over batch and mc sample dimensions
+            res_z_Qinv_res_z = tf.reduce_mean(tf.multiply(
+                    tf.tensordot(self.res_z, self.Qinv, axes=[[3], [0]]),
+                    self.res_z), axis=[0, 1])
+            res_z0_Q0inv_res_z0 = tf.reduce_mean(tf.multiply(
+                    tf.tensordot(self.res_z0, self.Q0inv, axes=[[2], [0]]),
+                    self.res_z0), axis=[0, 1])
+
+            # sum over time and observation dimensions
+            self.log_density_z = -0.5 * (tf.reduce_sum(res_z_Qinv_res_z)
+                + tf.reduce_sum(res_z0_Q0inv_res_z0)
                 + (self.num_time_pts-1) * tf.log(tf.matrix_determinant(self.Q))
                 + tf.log(tf.matrix_determinant(self.Q0))
                 + self.num_time_pts * self.dim_latent * tf.log(2.0 * np.pi))

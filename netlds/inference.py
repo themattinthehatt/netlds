@@ -2,7 +2,8 @@
 
 import numpy as np
 import tensorflow as tf
-from netlds.chol_utils import blk_tridiag_chol, blk_chol_inv
+from netlds.chol_utils import blk_tridiag_chol, blk_chol_inv, \
+    blk_chol_inv_multi
 
 
 class InferenceNetwork(object):
@@ -26,10 +27,9 @@ class InferenceNetwork(object):
         # set basic dims
         self.dim_input = dim_input
         self.dim_latent = dim_latent
+        self.num_mc_samples = 4  # number of MC samples for gradient updates
         # set rng seed for drawing samples of dynamic trajectories
         self.rng = rng
-        # # create list of input placeholders
-        # self.input_ph = None
         # use same data type throughout graph construction
         self.dtype = dtype
 
@@ -41,7 +41,7 @@ class InferenceNetwork(object):
         """Entropy of approximate posterior"""
         raise NotImplementedError
 
-    def sample(self, sess, num_samples):
+    def sample(self, sess, observations):
         """Draw samples from approximate posterior"""
         raise NotImplementedError
 
@@ -164,8 +164,7 @@ class SmoothingLDS(InferenceNetwork):
             name='obs_in_ph')
         self.samples_z = tf.random_normal(
             shape=[tf.shape(self.input_ph)[0],
-                   self.num_time_pts,
-                   self.dim_latent],
+                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
     def _build_inference_mlp(self):
@@ -240,13 +239,12 @@ class SmoothingLDS(InferenceNetwork):
             tf.matmul(self.A, self.Q0inv), self.A, transpose_b=True) \
                             + self.Qinv
         self.AQinvA_Qinv = tf.matmul(
-            tf.matmul(self.A, self.Qinv), self.A, transpose_b=True) \
-                           + self.Qinv
+            tf.matmul(self.A, self.Qinv), self.A, transpose_b=True) + self.Qinv
         self.AQ0inv = tf.matmul(-self.A, self.Q0inv)
         self.AQinv = tf.matmul(-self.A, self.Qinv)
 
         # put together components of precision matrix Sinv in tensor of
-        # shape [num_samples, num_time_pts, dim_latent, dim_latent]
+        # shape [batch_size, num_time_pts, dim_latent, dim_latent]
         Sinv_diag = tf.tile(
             tf.expand_dims(self.AQinvA_Qinv, 0),
             [self.num_time_pts - 2, 1, 1])
@@ -292,7 +290,7 @@ class SmoothingLDS(InferenceNetwork):
 
         # ia now S x T x dim_latent
 
-        # get sample for each element in batch
+        # get posterior means for each element in batch
         def scan_chol_inv(_, inputs):
             """inputs refer to L/U matrices, outputs to means"""
             [chol_decomp_Sinv_0, chol_decomp_Sinv_1, ia] = inputs
@@ -313,22 +311,39 @@ class SmoothingLDS(InferenceNetwork):
 
     def _build_posterior_samples(self):
 
+        # get posterior sample(s) for each element in batch
         def scan_chol_half_inv(_, inputs):
-            """inputs refer to L/U matrices, outputs to means"""
+            """
+            inputs refer to L/U matrices and N(0, 1) samples, outputs to
+            N(\mu, \sigma^2) samples
+            """
             [chol_decomp_Sinv_0, chol_decomp_Sinv_1, samples] = inputs
-            rands = blk_chol_inv(
+            rands = blk_chol_inv_multi(
                 chol_decomp_Sinv_0, chol_decomp_Sinv_1, samples,
                 lower=False, transpose=True)
 
             return rands
 
+        # note:
+        #   B - batch_size; T - num_time_pts; D - dim_latent; S - mc samples
+        #   self.chol_decomp_Sinv[0]: B x T x D x D
+        #   self.chol_decomp_Sinv[1]: B x (T-1) x D x D
+        #   self.samples_z: B x T x D x S
         rands = tf.scan(
             fn=scan_chol_half_inv,
             elems=[self.chol_decomp_Sinv[0], self.chol_decomp_Sinv[1],
                    self.samples_z],
-            initializer=self.post_z_means)  # throwaway for scan to behave
+            initializer=self.samples_z[0])  # throwaway for scan to behave
 
-        self.post_z_samples = self.post_z_means + rands
+        # rands is currently
+        # batch_size x num_time_pts x dim_latent x num_mc_samples
+        # reshape to
+        # batch_size x num_mc_samples x num_time_pts x dim_latent
+        # to push through generative model layers
+        rands = tf.transpose(rands, perm=[0, 3, 1, 2])
+
+        # tf addition op will broadcast extra 'num_mc_samples' dims
+        self.post_z_samples = tf.expand_dims(self.post_z_means, axis=1) + rands
 
     def entropy(self):
         """Entropy of approximate posterior"""
@@ -336,6 +351,8 @@ class SmoothingLDS(InferenceNetwork):
         # determinant of the covariance is the square of the determinant of the
         # cholesky factor; determinant of the cholesky factor is the product of
         # the diagonal elements of the block-diagonal
+
+        # mean over batch dimension, sum over time dimension
         ln_det = -2.0 * tf.reduce_sum(
             tf.reduce_mean(
                 tf.log(tf.matrix_diag_part(self.chol_decomp_Sinv[0])), axis=0))
@@ -351,10 +368,10 @@ class SmoothingLDS(InferenceNetwork):
 
         Args:
             sess (tf.Session object)
-            observations (num_samples x num_time_pts x num_inputs numpy array)
+            observations (batch_size x num_time_pts x num_inputs numpy array)
 
         Returns:
-            num_samples x num_time_pts x dim_latent numpy array
+            batch_size x num_mc_samples x num_time_pts x dim_latent numpy array
 
         """
 
@@ -420,11 +437,9 @@ class SmoothingLDSCoupled(SmoothingLDS):
         with tf.variable_scope('precision_matrix'):
             self._build_precision_matrix()
 
-        # posterior mean
         with tf.variable_scope('posterior_mean'):
             self._build_posterior_mean()
 
-        # sample from posterior
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
@@ -549,10 +564,10 @@ class MeanFieldGaussian(InferenceNetwork):
 
         Args:
             sess (tf.Session object)
-            observations (num_samples x num_time_pts x num_inputs numpy array)
+            observations (batch_size x num_time_pts x num_inputs numpy array)
 
         Returns:
-            num_samples x num_time_pts x dim_latent numpy array
+            batch_size x num_mc_samples x num_time_pts x dim_latent numpy array
 
         """
 

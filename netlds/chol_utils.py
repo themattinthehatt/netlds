@@ -123,6 +123,74 @@ def blk_chol_inv(D, B, b, lower=True, transpose=False):
     return X
 
 
+def blk_chol_inv_multi(D, B, y, lower=True, transpose=False):
+    """
+    Solve the equation C[x_1 ... x_N] = [y_1 ... y_N] for x_i, where C is
+    assumed to be a block-bidiagonal matrix (where only the first (lower or
+    upper) off-diagonal block is nonzero.
+
+    Pseudo-code at https://software.intel.com/en-us/node/531897
+
+    Args:
+        D (T x K x K tensor): each D[i, :, :] is the ith block diagonal matrix
+        B (T-1 x K x K tensor): each B[i,:,:] is the ith (upper or lower) 1st
+            block off-diagonal matrix
+        y (T x K x N tensor)
+        lower (bool): treat B as the lower or upper 1st block off-diagonal of
+            matrix C
+            DEFAULT: True
+        transpose (bool): whether to transpose the off-diagonal blocks
+            B[i, :, :] (useful if you want to solve the problem C^T x = y
+            with a representation of C)
+            DEFAULT: False
+
+    Returns:
+        T x K x N tensor: solutions of CX = Y
+
+    """
+
+    if transpose:
+        D = tf.transpose(D, perm=[0, 2, 1])
+        B = tf.transpose(B, perm=[0, 2, 1])
+
+    def update(outputs, inputs):
+        """
+
+        Args:
+            outputs (K x S tf.Tensor): RHS of CX=Y for a single time point
+            inputs (list of tf.Tensors): Di (K x K), Bi (K x K), yi (K x S):
+
+        Returns:
+            xi (K x S): LHS X of CX=Y for a single time point
+
+        """
+        [Di, Bi, yi] = inputs
+        xi = outputs
+        Gi = yi - tf.matmul(Bi, xi)
+
+        return tf.matmul(tf.matrix_inverse(Di), Gi)
+
+    if lower:
+
+        x0 = tf.matmul(tf.matrix_inverse(D[0]), y[0])
+        X = tf.scan(
+            fn=update, elems=[D[1:], B, y[1:]], initializer=x0)
+        X = tf.concat([tf.expand_dims(x0, axis=0), X], axis=0)
+
+    else:
+
+        # computation is the same, just need to reverse the order in which we
+        # iterate over the blocks
+        xN = tf.matmul(tf.matrix_inverse(D[-1]), y[-1])
+        X = tf.scan(
+            fn=update, elems=[D[:-1][::-1], B[::-1], y[:-1][::-1]],
+            initializer=xN)
+        # reverse results to put back in correct order
+        X = tf.concat([tf.expand_dims(xN, axis=0), X], axis=0)[::-1]
+
+    return X
+
+
 if __name__ == '__main__':
 
     # build a block tridiagonal matrix
