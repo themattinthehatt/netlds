@@ -8,7 +8,7 @@ class GenerativeModel(object):
     """Base class for generative models"""
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None, rng=123,
+            self, dim_obs=None, dim_latent=None, post_z_samples=None, rng=None,
             dtype=tf.float32, **kwargs):
         """
         Set base class attributes
@@ -49,7 +49,7 @@ class GenerativeModel(object):
         """Get parameters of generative model"""
         raise NotImplementedError
 
-    def sample(self, sess, num_samples=1):
+    def sample(self, sess, num_samples=1, seed=None):
         """Draw samples from model"""
         raise NotImplementedError
 
@@ -58,7 +58,7 @@ class LDS(GenerativeModel):
     """Linear dynamical system model with Gaussian observations"""
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None, rng=123,
+            self, dim_obs=None, dim_latent=None, post_z_samples=None, rng=None,
             dtype=tf.float32, num_time_pts=None, gen_params=None):
         """
         Generative model is defined as
@@ -355,7 +355,11 @@ class LDS(GenerativeModel):
                 tf.multiply(tf.square(self.res_y), self.Rinv), axis=[0, 1])
 
             # sum over time and observation dimensions
-            self.log_density_y = -0.5 * (tf.reduce_sum(res_y_Rinv_res_y)
+            test_like = tf.reduce_sum(res_y_Rinv_res_y)
+            tf.summary.scalar('log_joint_like', -0.5 * test_like)
+
+            # total term for likelihood
+            self.log_density_y = -0.5 * (test_like
                 + self.num_time_pts * tf.reduce_sum(tf.log(self.R))
                 + self.num_time_pts * self.dim_obs * tf.log(2.0 * np.pi))
 
@@ -374,25 +378,28 @@ class LDS(GenerativeModel):
                     tf.tensordot(self.res_z0, self.Q0inv, axes=[[2], [0]]),
                     self.res_z0), axis=[0, 1])
 
-            # sum over time and observation dimensions
-            self.log_density_z = -0.5 * (tf.reduce_sum(res_z_Qinv_res_z)
-                + tf.reduce_sum(res_z0_Q0inv_res_z0)
+            # sum over time and latent dimensions
+            test_prior = tf.reduce_sum(res_z_Qinv_res_z)
+            test_prior0 = tf.reduce_sum(res_z0_Q0inv_res_z0)
+            tf.summary.scalar('log_joint_prior', -0.5 * test_prior)
+            tf.summary.scalar('log_joint_prior0', -0.5 * test_prior0)
+
+            # total term for prior
+            self.log_density_z = -0.5 * (test_prior + test_prior0
                 + (self.num_time_pts-1) * tf.log(tf.matrix_determinant(self.Q))
                 + tf.log(tf.matrix_determinant(self.Q0))
                 + self.num_time_pts * self.dim_latent * tf.log(2.0 * np.pi))
 
-        # tf.summary.scalar('mat_det_Q0', tf.matrix_determinant(self.Q0))
-        # tf.summary.scalar('mat_det_Q', tf.matrix_determinant(self.Q))
-
         return self.log_density_y + self.log_density_z
 
-    def sample(self, sess, num_samples=1):
+    def sample(self, sess, num_samples=1, seed=None):
         """
         Generate samples from the model
 
         Args:
             sess (tf.Session object)
             num_samples (int, optional)
+            seed (int, optional)
 
         Returns:
             num_time_pts x dim_obs x num_samples numpy array:
@@ -401,6 +408,9 @@ class LDS(GenerativeModel):
                 sample latent states z
 
         """
+
+        if seed is not None:
+            tf.set_random_seed(seed)
 
         [y, z] = sess.run(
             [self.y_samples_prior, self.z_samples_prior],

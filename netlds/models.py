@@ -25,7 +25,8 @@ class Model(object):
             gen_model_params (dict)
             dtype (tf.Dtype)
             np_seed (int): for training minibatches
-            tf_seed (int): for initializing tf.Variables and sampling
+            tf_seed (int): for initializing tf.Variables (sampling functions
+                have their own seed arguments)
 
         """
 
@@ -219,8 +220,6 @@ class Model(object):
                 opt_params=opt_params,
                 output_dir=output_dir)
 
-            feed_dict = {self.inf_net.input_ph[0]: observations}
-
         return epoch
 
     def _train_loop(
@@ -332,12 +331,13 @@ class Model(object):
             self, sess, observations, input_data, train_indxs, test_indxs,
             epoch, epoch_time):
 
-        cost_train = self._get_cost(
-            sess=sess,
-            observations=observations,
-            input_data=input_data,
-            indxs=train_indxs)
-        cost_train /= len(train_indxs)
+        # cost_train = self._get_cost(
+        #     sess=sess,
+        #     observations=observations,
+        #     input_data=input_data,
+        #     indxs=train_indxs)
+        # cost_train /= len(train_indxs)
+        cost_train = np.nan
 
         if test_indxs is not None:
             cost_test = self._get_cost(
@@ -480,8 +480,13 @@ class Model(object):
         """Generates feed dict for training and other evaluation functions"""
         raise NotImplementedError
 
+    def get_cost(self, observations, input_data):
+        """User function for retrieving cost"""
+        raise NotImplementedError
+
     def sample(
-            self, ztype='prior', num_samples=1, checkpoint_file=None):
+            self, ztype='prior', num_samples=1, seed=None,
+            checkpoint_file=None):
         """
         Generate samples from prior/posterior and model
 
@@ -489,6 +494,8 @@ class Model(object):
             ztype (str): distribution used for latent state samples
                 'prior' | 'posterior'
             num_samples (int, optional)
+            seed (int, optional): random seed for reproducibly generating
+                random samples
             checkpoint_file (str, optional): checkpoint file specifying model
                 from which to generate samples; if `None`, will then look for a
                 checkpoint file created upon model initialization
@@ -506,11 +513,11 @@ class Model(object):
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             if ztype is 'prior':
-                y, z = self.gen_net.sample(sess, num_samples)
+                y, z = self.gen_net.sample(sess, num_samples, seed)
             elif ztype is 'posterior':
                 # TODO: needs data input as well
                 y = None
-                z = self.gen_net.sample_z(sess, num_samples)
+                z = self.gen_net.sample_z(sess, num_samples, seed)
             else:
                 raise ValueError('Invalid string "%s" for ztype argument')
 
@@ -992,6 +999,39 @@ class DynamicalModel(Model):
 
         return feed_dict
 
+    def get_cost(self, observations=None, input_data=None, indxs=None,
+                 checkpoint_file=None):
+        """
+        User function for retrieving cost
+
+        Args:
+            observations (num_samples x num_time_pts x dim_obs tf.Tensor):
+                observations on which to condition the posterior means
+            input_data (num_samples x num_time_pts x dim_input tf.Tensor,
+                optional)
+            indxs (list, optional): list of indices into observations and
+                input_data
+            checkpoint_file (str, optional): location of checkpoint file
+                specifying model from which to generate samples; if `None`,
+                will then look for a checkpoint file created upon model
+                initialization
+
+        Returns:
+            float: value of objective function
+
+        """
+
+        if indxs is None:
+            indxs = list(range(observations.shape[0]))
+
+        with tf.Session(graph=self.graph, config=self.sess_config) as sess:
+            self.restore_model(sess, checkpoint_file=checkpoint_file)
+            cost = self._get_cost(
+                sess=sess, observations=observations, input_data=input_data,
+                indxs=indxs)
+
+        return cost
+
 
 class LDSCoupledModel(DynamicalModel):
     """LDS generative model, LDS approximate posterior, shared parameters"""
@@ -1041,6 +1081,7 @@ class LDSCoupledModel(DynamicalModel):
         # build model graph
         with self.graph.as_default():
 
+            # set random seed for this graph
             tf.set_random_seed(self.tf_seed)
 
             with tf.variable_scope('shared_vars'):
@@ -1114,6 +1155,7 @@ class LDSModel(DynamicalModel):
         # build model graph
         with self.graph.as_default():
 
+            # set random seed for this graph
             tf.set_random_seed(self.tf_seed)
 
             with tf.variable_scope('inference_network'):

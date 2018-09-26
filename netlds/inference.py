@@ -10,7 +10,8 @@ class InferenceNetwork(object):
     """Base class for inference networks"""
 
     def __init__(
-            self, dim_input=None, dim_latent=None, rng=0, dtype=tf.float32):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
+            dtype=tf.float32):
         """
         Set base class attributes
 
@@ -27,7 +28,7 @@ class InferenceNetwork(object):
         # set basic dims
         self.dim_input = dim_input
         self.dim_latent = dim_latent
-        self.num_mc_samples = 4  # number of MC samples for gradient updates
+        self.num_mc_samples = num_mc_samples
         # set rng seed for drawing samples of dynamic trajectories
         self.rng = rng
         # use same data type throughout graph construction
@@ -53,12 +54,12 @@ class SmoothingLDS(InferenceNetwork):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, rng=0, dtype=tf.float32,
-            num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=0,
+            dtype=tf.float32, num_time_pts=None):
 
         super(SmoothingLDS, self).__init__(
             dim_input=dim_input, dim_latent=dim_latent, rng=rng,
-            dtype=dtype)
+            dtype=dtype, num_mc_samples=num_mc_samples)
 
         self.num_time_pts = num_time_pts
 
@@ -274,8 +275,6 @@ class SmoothingLDS(InferenceNetwork):
             chol_decomp_Sinv = blk_tridiag_chol(inputs, Sinv_ldiag0)
             return chol_decomp_Sinv
 
-        # self.chol_decomp_Sinv = tf.scan(
-        #     fn=scan_chol, elems=[self.Sinv_diag, Sinv_ldiag1])
         self.chol_decomp_Sinv = tf.scan(
             fn=scan_chol, elems=self.Sinv_diag,
             initializer=[Sinv_diag, Sinv_ldiag0],  # throwaway to get scan
@@ -353,9 +352,9 @@ class SmoothingLDS(InferenceNetwork):
         # the diagonal elements of the block-diagonal
 
         # mean over batch dimension, sum over time dimension
+        diags = tf.matrix_diag_part(self.chol_decomp_Sinv[0])
         ln_det = -2.0 * tf.reduce_sum(
-            tf.reduce_mean(
-                tf.log(tf.matrix_diag_part(self.chol_decomp_Sinv[0])), axis=0))
+            tf.reduce_mean(tf.log(diags), axis=0))
 
         entropy = ln_det / 2.0 + self.dim_latent * self.num_time_pts / 2.0 * (
                     1.0 + np.log(2.0 * np.pi))
@@ -407,12 +406,12 @@ class SmoothingLDSCoupled(SmoothingLDS):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, rng=0, dtype=tf.float32,
-            num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
+            dtype=tf.float32, num_time_pts=None):
 
         super(SmoothingLDSCoupled, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent, rng=rng,
-            dtype=dtype, num_time_pts=num_time_pts)
+            dim_input=dim_input, dim_latent=dim_latent, rng=rng, dtype=dtype,
+            num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
 
     def build_graph(self, z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv):
         """Build tensorflow computation graph for inference network"""
@@ -459,8 +458,8 @@ class MeanFieldGaussian(InferenceNetwork):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, rng=0, dtype=tf.float32,
-            num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
+            dtype=tf.float32, num_time_pts=None):
 
         super(MeanFieldGaussian, self).__init__(
             dim_input=dim_input, dim_latent=dim_latent, rng=rng,
@@ -594,8 +593,9 @@ class MeanFieldGaussianTemporal(MeanFieldGaussian):
     matrix.
     """
 
-    def __init__(self, dim_input=None, dim_latent=None, rng=0,
-                 dtype=tf.float32, num_time_pts=None):
+    def __init__(
+            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
+            dtype=tf.float32, num_time_pts=None):
 
         super(MeanFieldGaussianTemporal, self).__init__(
             dim_input=dim_input, dim_latent=dim_latent, rng=rng,
