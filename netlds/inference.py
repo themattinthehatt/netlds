@@ -10,8 +10,7 @@ class InferenceNetwork(object):
     """Base class for inference networks"""
 
     def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
-            dtype=tf.float32):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1):
         """
         Set base class attributes
 
@@ -20,8 +19,6 @@ class InferenceNetwork(object):
                 neural network to provide data-point specific distributional
                 parameters of the approximate posterior
             dim_latent (int): dimension of latent state
-            rng (int): rng seed for generating samples of observations
-            dtype (tf.Dtype): data type for all model variables, placeholders
 
         """
 
@@ -29,10 +26,8 @@ class InferenceNetwork(object):
         self.dim_input = dim_input
         self.dim_latent = dim_latent
         self.num_mc_samples = num_mc_samples
-        # set rng seed for drawing samples of dynamic trajectories
-        self.rng = rng
         # use same data type throughout graph construction
-        self.dtype = dtype
+        self.dtype = tf.float32
 
     def build_graph(self, *args, **kwargs):
         """Build tensorflow computation graph for inference network"""
@@ -42,7 +37,7 @@ class InferenceNetwork(object):
         """Entropy of approximate posterior"""
         raise NotImplementedError
 
-    def sample(self, sess, observations):
+    def sample(self, sess, observations, seed=None):
         """Draw samples from approximate posterior"""
         raise NotImplementedError
 
@@ -54,12 +49,12 @@ class SmoothingLDS(InferenceNetwork):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=0,
-            dtype=tf.float32, num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1,
+            num_time_pts=None):
 
         super(SmoothingLDS, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent, rng=rng,
-            dtype=dtype, num_mc_samples=num_mc_samples)
+            dim_input=dim_input, dim_latent=dim_latent,
+            num_mc_samples=num_mc_samples)
 
         self.num_time_pts = num_time_pts
 
@@ -361,22 +356,26 @@ class SmoothingLDS(InferenceNetwork):
 
         return entropy
 
-    def sample(self, sess, observations):
+    def sample(self, sess, observations, seed=None):
         """
         Draw samples from approximate posterior
 
         Args:
             sess (tf.Session object)
             observations (batch_size x num_time_pts x num_inputs numpy array)
+            seed (int, optional)
 
         Returns:
             batch_size x num_mc_samples x num_time_pts x dim_latent numpy array
 
         """
 
-        feed_dict = {self.input_ph: observations}
+        if seed is not None:
+            tf.set_random_seed(seed)
 
-        return sess.run(self.post_z_samples, feed_dict=feed_dict)
+        return sess.run(
+            self.post_z_samples,
+            feed_dict={self.input_ph: observations})
 
     def get_params(self, sess):
         """Get parameters of generative model"""
@@ -406,11 +405,11 @@ class SmoothingLDSCoupled(SmoothingLDS):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
-            dtype=tf.float32, num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1,
+            num_time_pts=None):
 
         super(SmoothingLDSCoupled, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent, rng=rng, dtype=dtype,
+            dim_input=dim_input, dim_latent=dim_latent,
             num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
 
     def build_graph(self, z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv):
@@ -458,14 +457,14 @@ class MeanFieldGaussian(InferenceNetwork):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
-            dtype=tf.float32, num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1,
+            num_time_pts=None):
 
-        super(MeanFieldGaussian, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent, rng=rng,
-            dtype=dtype)
+        super().__init__(
+            dim_input=dim_input, dim_latent=dim_latent)
 
         self.num_time_pts = num_time_pts
+        self.num_mc_samples = num_mc_samples
 
     def build_graph(self):
         """Build tensorflow computation graph for inference network"""
@@ -557,22 +556,26 @@ class MeanFieldGaussian(InferenceNetwork):
 
         return entropy
 
-    def sample(self, sess, observations):
+    def sample(self, sess, observations, seed=None):
         """
         Draw samples from approximate posterior
 
         Args:
             sess (tf.Session object)
             observations (batch_size x num_time_pts x num_inputs numpy array)
+            seed (int, optional)
 
         Returns:
             batch_size x num_mc_samples x num_time_pts x dim_latent numpy array
 
         """
 
-        feed_dict = {self.input_ph: observations}
+        if seed is not None:
+            tf.set_random_seed(seed)
 
-        return sess.run(self.post_z_samples, feed_dict=feed_dict)
+        return sess.run(
+            self.post_z_samples,
+            feed_dict={self.input_ph: observations})
 
     def get_posterior_means(self, sess, observations):
         """Get posterior means conditioned on observations"""
@@ -594,12 +597,12 @@ class MeanFieldGaussianTemporal(MeanFieldGaussian):
     """
 
     def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1, rng=None,
-            dtype=tf.float32, num_time_pts=None):
+            self, dim_input=None, dim_latent=None, num_mc_samples=1,
+            num_time_pts=None):
 
-        super(MeanFieldGaussianTemporal, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent, rng=rng,
-            dtype=dtype, num_time_pts=num_time_pts)
+        super().__init__(
+            dim_input=dim_input, dim_latent=dim_latent,
+            num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
 
     def build_graph(self):
         """Build tensorflow computation graph for inference network"""

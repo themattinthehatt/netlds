@@ -13,7 +13,7 @@ class Model(object):
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, dtype=tf.float32, np_seed=0, tf_seed=0):
+            gen_model_params=None, np_seed=0, tf_seed=0):
         """
         Constructor for full Model; combines an inference network with a
         generative model and provides training functions
@@ -23,7 +23,6 @@ class Model(object):
             inf_network_params (dict)
             gen_model (GenerativeModel class)
             gen_model_params (dict)
-            dtype (tf.Dtype)
             np_seed (int): for training minibatches
             tf_seed (int): for initializing tf.Variables (sampling functions
                 have their own seed arguments)
@@ -31,9 +30,8 @@ class Model(object):
         """
 
         # initialize inference network and generative models
-        self.dtype = dtype
-        self.inf_net = inf_network(dtype=dtype, **inf_network_params)
-        self.gen_net = gen_model(dtype=dtype, **gen_model_params)
+        self.inf_net = inf_network(**inf_network_params)
+        self.gen_net = gen_model(**gen_model_params)
 
         # location of generative model params if not part of Model
         self.checkpoint = None
@@ -53,7 +51,6 @@ class Model(object):
             'inf_network_params': inf_network_params,
             'gen_model': gen_model,
             'gen_model_params': gen_model_params,
-            'dtype': dtype,
             'np_seed': np_seed,
             'tf_seed': tf_seed}
         self.constructor_inputs = constructor_inputs
@@ -854,7 +851,7 @@ class DynamicalModel(Model):
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, dtype=tf.float32, np_seed=0, tf_seed=0):
+            gen_model_params=None, np_seed=0, tf_seed=0):
         """
         Constructor for full Model; combines an inference network with a
         generative model and provides training functions
@@ -864,14 +861,15 @@ class DynamicalModel(Model):
             inf_network_params (dict)
             gen_model (GenerativeModel class)
             gen_model_params (dict)
-            dtype (tf.Dtype)
+            np_seed (int)
+            tf_seed (int)
 
         """
 
         super(DynamicalModel, self).__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
-            dtype=dtype, np_seed=np_seed, tf_seed=tf_seed)
+            np_seed=np_seed, tf_seed=tf_seed)
 
         # to clean up training functions
         self.dim_obs = self.gen_net.dim_obs
@@ -1042,7 +1040,7 @@ class LDSCoupledModel(DynamicalModel):
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, dtype=tf.float32, np_seed=0, tf_seed=0):
+            gen_model_params=None, np_seed=0, tf_seed=0):
         """
         Constructor for full Model; see DynamicalModel for full arg
         documentation
@@ -1069,7 +1067,7 @@ class LDSCoupledModel(DynamicalModel):
         super(LDSCoupledModel, self).__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
-            dtype=dtype, np_seed=np_seed, tf_seed=tf_seed)
+            np_seed=np_seed, tf_seed=tf_seed)
 
         self.constructor_inputs['model_class'] = LDSCoupledModel
 
@@ -1121,7 +1119,7 @@ class LDSModel(DynamicalModel):
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, dtype=tf.float32, np_seed=0, tf_seed=0):
+            gen_model_params=None, np_seed=0, tf_seed=0):
         """
         Constructor for full Model; see DynamicalModel for arg documentation
 
@@ -1143,7 +1141,7 @@ class LDSModel(DynamicalModel):
         super(LDSModel, self).__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
-            dtype=dtype, np_seed=np_seed, tf_seed=tf_seed)
+            np_seed=np_seed, tf_seed=tf_seed)
 
         self.constructor_inputs['model_class'] = LDSModel
 
