@@ -798,8 +798,79 @@ class PLDSCoupled(LDSCoupled, PLDS):
 
 
 class FLDS(LDS):
-    pass
+    """
+    Linear dynamical system model with neural network transformation to output
+    and Gaussian observations
+    """
 
+    def __init__(
+            self, dim_obs=None, dim_latent=None, post_z_samples=None,
+            num_time_pts=None, gen_params=None, ):
+        """
+        Generative model is defined as
+            z_t = A z_{t-1} + \eps
+            y_t = f(z_t) + \eta
+        where f() is parameterized with a neural network
+
+        Args:
+            num_time_pts (int): number of time points per observation of the
+                dynamical sequence
+            gen_params (dict): dictionary of generative params for initializing
+                model
+
+        """
+
+        super().__init__(
+            dim_obs=dim_obs, dim_latent=dim_latent, num_time_pts=num_time_pts,
+            post_z_samples=post_z_samples, gen_params=gen_params)
+
+    def _initialize_mapping(self):
+        """Initialize mapping from latent space to observations"""
+
+        # should eventually become user options
+        tr_norm_initializer = tf.initializers.truncated_normal(
+            mean=0.0, stddev=0.1, dtype=self.dtype)
+        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
+        activation = None
+        use_bias = True
+        kernel_initializer = tr_norm_initializer
+        bias_initializer = zeros_initializer
+        kernel_regularizer = None
+        bias_regularizer = None
+        num_layers = 1
+
+        # square root of diagonal of observation covariance matrix
+        # (assume diagonal)
+        if 'Rsqrt' in self.gen_params:
+            self.Rsqrt = tf.get_variable(
+                'Rsqrt',
+                initializer=self.gen_params['Rsqrt'],
+                dtype=self.dtype)
+        else:
+            self.Rsqrt = tf.get_variable(
+                'Rsqrt',
+                shape=[1, self.dim_obs],
+                initializer=tr_norm_initializer,
+                dtype=self.dtype)
+        self.R = tf.square(self.Rsqrt)
+        self.Rinv = 1.0 / self.R
+
+        # observation matrix
+        # self.mapping = tf.layers.Dense(
+        #     units=self.dim_obs,
+        #     activation=None,
+        #     use_bias=True,
+        #     kernel_initializer=kernel_initializer,
+        #     bias_initializer=bias_initializer,
+        #     kernel_regularizer=kernel_regularizer,
+        #     bias_regularizer=bias_regularizer,
+        #     name='mapping')
+
+
+    def _apply_mapping(self, z_samples):
+        """Apply model mapping from latent space to observations"""
+        return tf.add(tf.tensordot(z_samples, self.C, axes=[[3], [0]]), self.d)
+        # return self.mapping.apply(z_samples)
 
 class FLDSCoupled(LDSCoupled):
     pass
