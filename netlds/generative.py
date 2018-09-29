@@ -49,7 +49,7 @@ class LDS(GenerativeModel):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None):
+            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -60,6 +60,7 @@ class LDS(GenerativeModel):
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
                 model
+            noise_dist (str): 'gaussian' | 'poisson'
 
         """
 
@@ -87,10 +88,19 @@ class LDS(GenerativeModel):
         else:
             bias_initializer = tf.initializers.zeros(dtype=self.dtype)
 
+        # spiking nl
+        self.noise_dist = noise_dist
+        if noise_dist is 'gaussian':
+            activation = None
+        elif noise_dist is 'poisson':
+            activation = tf.nn.softplus
+        else:
+            raise ValueError
+
         # list of dicts specifying (linear) nn to observations
         self.nn_params = [{
             'units': self.dim_obs,
-            'activation': None,
+            'activation': activation,
             'kernel_initializer': kernel_initializer,
             'bias_initializer': bias_initializer,
             'kernel_regularizer': None,
@@ -122,6 +132,7 @@ class LDS(GenerativeModel):
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
             self._initialize_mapping()
+            self._initialize_noise_dist_vars()
             self.y_pred = self._apply_mapping(z_samples)
 
         # define branch of graph for evaluating prior model
@@ -200,31 +211,31 @@ class LDS(GenerativeModel):
         self.Q0inv = tf.matrix_inverse(self.Q0, name='Q0inv')
         self.Qinv = tf.matrix_inverse(self.Q, name='Qinv')
 
+    def _initialize_noise_dist_vars(self):
+
+        if self.noise_dist is 'gaussian':
+            tr_norm_initializer = tf.initializers.truncated_normal(
+                mean=0.0, stddev=0.1, dtype=self.dtype)
+            zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
+
+            # square root of diagonal of observation covariance matrix
+            # (assume diagonal)
+            if 'Rsqrt' in self.gen_params:
+                self.Rsqrt = tf.get_variable(
+                    'Rsqrt',
+                    initializer=self.gen_params['Rsqrt'],
+                    dtype=self.dtype)
+            else:
+                self.Rsqrt = tf.get_variable(
+                    'Rsqrt',
+                    shape=[1, self.dim_obs],
+                    initializer=tr_norm_initializer,
+                    dtype=self.dtype)
+            self.R = tf.square(self.Rsqrt)
+            self.Rinv = 1.0 / self.R
+
     def _initialize_mapping(self):
         """Initialize mapping from latent space to observations"""
-
-        # should eventually become user options
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-
-        # square root of diagonal of observation covariance matrix
-        # (assume diagonal)
-        if 'Rsqrt' in self.gen_params:
-            self.Rsqrt = tf.get_variable(
-                'Rsqrt',
-                initializer=self.gen_params['Rsqrt'],
-                dtype=self.dtype)
-        else:
-            self.Rsqrt = tf.get_variable(
-                'Rsqrt',
-                shape=[1, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
-        self.R = tf.square(self.Rsqrt)
-        self.Rinv = 1.0 / self.R
-
-        # build mapping to observations
         self.layers = []
         for _, layer_params in enumerate(self.nn_params):
             self.layers.append(tf.layers.Dense(**layer_params))
@@ -251,51 +262,98 @@ class LDS(GenerativeModel):
             shape=[self.num_samples_ph, self.num_time_pts, self.dim_latent],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='latent_rand_samples')
 
-        self.obs_rand_samples = tf.random_normal(
-            shape=[self.num_samples_ph, self.num_time_pts, self.dim_obs],
-            mean=0.0, stddev=1.0, dtype=self.dtype, name='obs_rand_samples')
+        if self.noise_dist is 'gaussian':
 
-        def lds_update(outputs, inputs):
+            self.obs_rand_samples = tf.random_normal(
+                shape=[self.num_samples_ph, self.num_time_pts, self.dim_obs],
+                mean=0.0, stddev=1.0, dtype=self.dtype,
+                name='obs_rand_samples')
 
-            [z_val, y_val] = outputs
-            [rand_z, rand_y] = inputs
+            def lds_update(outputs, inputs):
 
-            z_val = tf.matmul(z_val, tf.transpose(self.A)) \
-                + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
+                [z_val, y_val] = outputs
+                [rand_z, rand_y] = inputs
+
+                z_val = tf.matmul(z_val, tf.transpose(self.A)) \
+                    + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
+                # expand dims to account for time and mc dims with mapping
+                expanded_z = tf.expand_dims(
+                    tf.expand_dims(z_val, axis=1), axis=1)
+                y_val = tf.squeeze(
+                    self._apply_mapping(expanded_z), axis=[1, 2]) \
+                    + tf.multiply(rand_y, self.Rsqrt)
+
+                return [z_val, y_val]
+
+            # calculate samples for first time point
+            z0 = self.z0_mean \
+                + tf.matmul(self.latent_rand_samples[:, 0, :],
+                            tf.transpose(self.Q0_sqrt))
             # expand dims to account for time and mc dims when applying mapping
-            expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1), axis=1)
-            y_val = tf.squeeze(
-                self._apply_mapping(expanded_z), axis=[1, 2]) \
-                + tf.multiply(rand_y, self.Rsqrt)
+            expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
+            y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2]) \
+                + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
 
-            return [z_val, y_val]
+            # scan over time points, not samples
+            rand_ph_shuff = tf.transpose(
+                self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
+            obs_noise_ph_shuff = tf.transpose(
+                self.obs_rand_samples[:, 1:, :], perm=[1, 0, 2])
+            samples = tf.scan(
+                fn=lds_update,
+                elems=[rand_ph_shuff, obs_noise_ph_shuff],
+                initializer=[z0, y0])
 
-        # calculate samples for first time point
-        z0 = self.z0_mean \
-            + tf.matmul(self.latent_rand_samples[:, 0, :],
-                        tf.transpose(self.Q0_sqrt))
-        # expand dims to account for time and mc dims when applying mapping
-        expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-        y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2]) \
-            + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
+            z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
+            y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
 
-        # scan over time points, not samples
-        rand_ph_shuff = tf.transpose(
-            self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
-        obs_noise_ph_shuff = tf.transpose(
-            self.obs_rand_samples[:, 1:, :], perm=[1, 0, 2])
-        samples = tf.scan(
-            fn=lds_update,
-            elems=[rand_ph_shuff, obs_noise_ph_shuff],
-            initializer=[z0, y0])
+            self.z_samples_prior = tf.concat(
+                [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
+            self.y_samples_prior = tf.concat(
+                [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
 
-        z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
-        y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
+        elif self.noise_dist is 'poisson':
 
-        self.z_samples_prior = tf.concat(
-            [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
-        self.y_samples_prior = tf.concat(
-            [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
+            def lds_update(outputs, inputs):
+
+                [z_val, y_val] = outputs
+                rand_z = inputs
+
+                z_val = tf.matmul(z_val, tf.transpose(self.A)) \
+                        + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
+                # expand dims to account for time and mc dims with mapping
+                expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1),
+                                            axis=1)
+                y_val = tf.squeeze(self._apply_mapping(expanded_z),
+                                   axis=[1, 2])
+
+                return [z_val, y_val]
+
+            # calculate samples for first time point
+            z0 = self.z0_mean \
+                 + tf.matmul(self.latent_rand_samples[:, 0, :],
+                             tf.transpose(self.Q0_sqrt))
+            # expand dims to account for time and mc dims when applying mapping
+            expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
+            y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2])
+
+            # scan over time points, not samples
+            rand_ph_shuff = tf.transpose(
+                self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
+            samples = tf.scan(
+                fn=lds_update,
+                elems=rand_ph_shuff,
+                initializer=[z0, y0])
+
+            z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
+            y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
+
+            self.z_samples_prior = tf.concat(
+                [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
+            y_samples_prior = tf.concat(
+                [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
+            self.y_samples_prior = tf.squeeze(tf.random_poisson(
+                lam=y_samples_prior, shape=[1], dtype=self.dtype), axis=0)
 
     def log_density(self, y, z):
         """
@@ -327,21 +385,40 @@ class LDS(GenerativeModel):
         return self.log_density_y + self.log_density_z
 
     def _log_density_likelihood(self, y):
-        # expand observation dims over mc samples
-        res_y = tf.expand_dims(self.obs_ph, axis=1) - y
 
-        # average over batch and mc sample dimensions
-        res_y_Rinv_res_y = tf.reduce_mean(
-            tf.multiply(tf.square(res_y), self.Rinv), axis=[0, 1])
+        if self.noise_dist is 'gaussian':
+            # expand observation dims over mc samples
+            res_y = tf.expand_dims(self.obs_ph, axis=1) - y
 
-        # sum over time and observation dimensions
-        test_like = tf.reduce_sum(res_y_Rinv_res_y)
-        tf.summary.scalar('log_joint_like', -0.5 * test_like)
+            # average over batch and mc sample dimensions
+            res_y_Rinv_res_y = tf.reduce_mean(
+                tf.multiply(tf.square(res_y), self.Rinv), axis=[0, 1])
 
-        # total term for likelihood
-        log_density_y = -0.5 * (test_like
-             + self.num_time_pts * tf.reduce_sum(tf.log(self.R))
-             + self.num_time_pts * self.dim_obs * tf.log(2.0 * np.pi))
+            # sum over time and observation dimensions
+            test_like = tf.reduce_sum(res_y_Rinv_res_y)
+            tf.summary.scalar('log_joint_like', -0.5 * test_like)
+
+            # total term for likelihood
+            log_density_y = -0.5 * (test_like
+                 + self.num_time_pts * tf.reduce_sum(tf.log(self.R))
+                 + self.num_time_pts * self.dim_obs * tf.log(2.0 * np.pi))
+
+        elif self.noise_dist is 'poisson':
+
+            # expand observation dims over mc samples
+            obs_y = tf.expand_dims(self.obs_ph, axis=1)
+
+            # average over batch and mc sample dimensions
+            log_density_ya = tf.reduce_mean(
+                tf.multiply(obs_y, tf.log(y)) - y - tf.lgamma(1 + obs_y),
+                axis=[0, 1])
+
+            # sum over time and observation dimensions
+            log_density_y = tf.reduce_sum(log_density_ya)
+            tf.summary.scalar('log_joint_like', log_density_y)
+
+        else:
+            raise ValueError
 
         return log_density_y
 
@@ -401,13 +478,23 @@ class LDS(GenerativeModel):
     def get_params(self, sess):
         """Get parameters of generative model"""
 
-        A, layer_weights, Rsqrt, z0_mean, Q, Q0 = sess.run(
-            [self.A, self.layers[0].weights, self.Rsqrt, self.z0_mean,
-             self.Q, self.Q0])
+        if self.noise_dist is 'gaussian':
+            A, layer_weights, Rsqrt, z0_mean, Q, Q0 = sess.run(
+                [self.A, self.layers[0].weights, self.Rsqrt, self.z0_mean,
+                 self.Q, self.Q0])
 
-        param_dict = {
-            'A': A, 'C': layer_weights[0], 'd': layer_weights[1],
-            'R': np.square(Rsqrt), 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+            param_dict = {
+                'A': A, 'C': layer_weights[0], 'd': layer_weights[1],
+                'R': np.square(Rsqrt), 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+        elif self.noise_dist is 'poisson':
+            A, C, d, z0_mean, Q, Q0 = sess.run(
+                [self.A, self.layers[0].weights, self.z0_mean, self.Q,
+                 self.Q0])
+
+            param_dict = {
+                'A': A, 'C': C, 'd': d, 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+        else:
+            raise ValueError
 
         return param_dict
 
@@ -421,7 +508,7 @@ class LDSCoupled(LDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None):
+            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -437,7 +524,8 @@ class LDSCoupled(LDS):
 
         super().__init__(
             dim_obs=dim_obs, dim_latent=dim_latent, gen_params=gen_params,
-            post_z_samples=post_z_samples, num_time_pts=num_time_pts)
+            post_z_samples=post_z_samples, num_time_pts=num_time_pts,
+            noise_dist=noise_dist)
 
     def build_graph(
             self, z_samples, z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv):
@@ -478,6 +566,7 @@ class LDSCoupled(LDS):
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
             self._initialize_mapping()
+            self._initialize_noise_dist_vars()
             self.y_pred = self._apply_mapping(z_samples)
 
         # define branch of graph for evaluating prior model
@@ -553,165 +642,6 @@ class LDSCoupled(LDS):
         return z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv
 
 
-class PLDS(LDS):
-    """Linear dynamical system model with Poisson observations"""
-
-    def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None,
-            spiking_nl='softplus'):
-        """
-        Generative model is defined as
-            z_t = A z_{t-1} + \eps
-            y_t = Poisson(C z_t + d)
-
-        Args:
-            num_time_pts (int): number of time points per observation of the
-                dynamical sequence
-            gen_params (dict): dictionary of generative params for initializing
-                model
-            spiking_nl (tf function): spiking nonlinearity on the output of the
-                generative model
-                'softplus' | 'exponential' | 'relu'
-
-        """
-
-        super().__init__(
-            dim_obs=dim_obs, dim_latent=dim_latent, gen_params=gen_params,
-            post_z_samples=post_z_samples, num_time_pts=num_time_pts)
-
-        if spiking_nl is 'softplus':
-            self.spiking_nl = tf.nn.softplus
-        elif spiking_nl is 'exponential':
-            self.spiking_nl = tf.exp
-        elif spiking_nl is 'relu':
-            self.spiking_nl = tf.nn.relu
-        else:
-            raise ValueError(
-                '"%s" is not a valid spiking nonlinearity' % spiking_nl)
-
-    def _initialize_mapping(self):
-        """Initialize mapping from latent space to observations"""
-
-        # build mapping to observations
-        self.layers = []
-        for _, layer_params in enumerate(self.nn_params):
-            self.layers.append(tf.layers.Dense(**layer_params))
-
-    def _sample_yz(self):
-        """
-        Define branch of tensorflow computation graph for sampling from the
-        prior
-        """
-
-        self.num_samples_ph = tf.placeholder(
-            dtype=tf.int32, shape=None, name='num_samples_ph')
-
-        self.latent_rand_samples = tf.random_normal(
-            shape=[self.num_samples_ph, self.num_time_pts, self.dim_latent],
-            mean=0.0, stddev=1.0, dtype=self.dtype, name='latent_rand_samples')
-
-        def lds_update(outputs, inputs):
-
-            [z_val, y_val] = outputs
-            rand_z = inputs
-
-            z_val = tf.matmul(z_val, tf.transpose(self.A)) \
-                + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
-            # expand dims to account for time and mc dims when applying mapping
-            expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1), axis=1)
-            y_val = tf.squeeze(self._apply_mapping(expanded_z), axis=[1, 2])
-
-            return [z_val, y_val]
-
-        # calculate samples for first time point
-        z0 = self.z0_mean \
-            + tf.matmul(self.latent_rand_samples[:, 0, :],
-                        tf.transpose(self.Q0_sqrt))
-        # expand dims to account for time and mc dims when applying mapping
-        expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-        y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2])
-
-        # scan over time points, not samples
-        rand_ph_shuff = tf.transpose(
-            self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
-        samples = tf.scan(
-            fn=lds_update,
-            elems=rand_ph_shuff,
-            initializer=[z0, y0])
-
-        z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
-        y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
-
-        self.z_samples_prior = tf.concat(
-            [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
-        y_samples_prior = tf.concat(
-            [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
-        self.y_samples_prior = tf.squeeze(tf.random_poisson(
-            lam=y_samples_prior, shape=[1], dtype=self.dtype), axis=0)
-
-    def _log_density_likelihood(self, y):
-
-        # expand observation dims over mc samples
-        obs_y = tf.expand_dims(self.obs_ph, axis=1)
-
-        # average over batch and mc sample dimensions
-        log_density_ya = tf.reduce_mean(
-            tf.multiply(obs_y, tf.log(y)) - y - tf.lgamma(1 + obs_y),
-            axis=[0, 1])
-
-        # sum over time and observation dimensions
-        log_density_y = tf.reduce_sum(log_density_ya)
-        tf.summary.scalar('log_joint_like', log_density_y)
-
-        return log_density_y
-
-    def get_params(self, sess):
-        """Get parameters of generative model"""
-
-        A, C, d, z0_mean, Q, Q0 = sess.run(
-            [self.A, self.layers[0].weights, self.z0_mean, self.Q, self.Q0])
-
-        param_dict = {
-            'A': A, 'C': C, 'd': d, 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
-
-        return param_dict
-
-
-class PLDSCoupled(LDSCoupled, PLDS):
-    """
-    Linear dynamical system model with Poisson observations; model parameters
-    are coupled to parameters of approximate posterior SmoothingLDSCoupled
-    through the use of the LDSCoupled Model class
-    """
-
-    def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None,
-            spiking_nl='softplus'):
-        """
-        Generative model is defined as
-            z_t = A z_{t-1} + \eps
-            y_t = Poisson(C z_t + d)
-
-        Args:
-            num_time_pts (int): number of time points per observation of the
-                dynamical sequence
-            gen_params (dict): dictionary of generative params for initializing
-                model
-            spiking_nl (tf function): spiking nonlinearity on the output of the
-                generative model
-                'softplus' | 'exponential' | 'relu'
-
-        """
-
-        PLDS.__init__(
-            self, dim_obs=dim_obs, dim_latent=dim_latent,
-            gen_params=gen_params, num_time_pts=num_time_pts,
-            post_z_samples=post_z_samples,
-            spiking_nl=spiking_nl)
-
-
 class FLDS(LDS):
     """
     Linear dynamical system model with neural network transformation to output
@@ -728,7 +658,8 @@ class FLDS(LDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, nn_params=None):
+            num_time_pts=None, gen_params=None, nn_params=None,
+            noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -747,7 +678,8 @@ class FLDS(LDS):
 
         super().__init__(
             dim_obs=dim_obs, dim_latent=dim_latent, num_time_pts=num_time_pts,
-            post_z_samples=post_z_samples, gen_params=gen_params)
+            post_z_samples=post_z_samples, gen_params=gen_params,
+            noise_dist=noise_dist)
 
         if nn_params is None:
             nn_params = [{}]
@@ -810,7 +742,8 @@ class FLDSCoupled(LDSCoupled, FLDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, nn_params=None):
+            num_time_pts=None, gen_params=None, nn_params=None,
+            noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -828,12 +761,5 @@ class FLDSCoupled(LDSCoupled, FLDS):
         FLDS.__init__(
             self, dim_obs=dim_obs, dim_latent=dim_latent,
             gen_params=gen_params, num_time_pts=num_time_pts,
-            post_z_samples=post_z_samples, nn_params=nn_params)
-
-
-class PFLDS(PLDS):
-    pass
-
-
-class PFLDSCoupled(PLDSCoupled):
-    pass
+            post_z_samples=post_z_samples, nn_params=nn_params,
+            noise_dist=noise_dist,)

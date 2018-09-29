@@ -452,7 +452,7 @@ class LDSCoupledModel(DynamicalModel):
 
     _allowed_inf_networks = ['SmoothingLDSCoupled']
     _allowed_gen_models = [
-        'LDSCoupled', 'PLDSCoupled', 'FLDSCoupled', 'PFLDSCoupled']
+        'LDSCoupled', 'FLDSCoupled']
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
@@ -531,7 +531,7 @@ class LDSModel(DynamicalModel):
 
     _allowed_inf_networks = [
         'MeanFieldGaussian', 'MeanFieldGaussianTemporal', 'SmoothingLDS']
-    _allowed_gen_models = ['LDS', 'PLDS', 'FLDS', 'PFLDS']
+    _allowed_gen_models = ['LDS', 'FLDS']
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
