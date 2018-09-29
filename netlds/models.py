@@ -582,7 +582,7 @@ class LDSModel(DynamicalModel):
                 self._define_objective()
 
             with tf.variable_scope('optimizer'):
-                self.trainer._define_optimizer_op(self, opt_params=opt_params)
+                self.trainer._define_optimizer_op(self)
 
             # add additional ops
             # for saving and restoring models (initialized after var creation)

@@ -51,6 +51,14 @@ class GenerativeModel(object):
 class LDS(GenerativeModel):
     """Linear dynamical system model with Gaussian observations"""
 
+    _layer_defaults = {
+        'units': 30,
+        'activation': 'tanh',
+        'kernel_initializer': 'trunc_normal',
+        'kernel_regularizer': None,
+        'bias_initializer': 'zeros',
+        'bias_regularizer': None}
+
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
             num_time_pts=None, gen_params=None):
@@ -803,9 +811,17 @@ class FLDS(LDS):
     and Gaussian observations
     """
 
+    _layer_defaults = {
+        'units': 30,
+        'activation': 'tanh',
+        'kernel_initializer': 'trunc_normal',
+        'kernel_regularizer': None,
+        'bias_initializer': 'zeros',
+        'bias_regularizer': None}
+
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, ):
+            num_time_pts=None, gen_params=None, nn_params=None):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -817,6 +833,8 @@ class FLDS(LDS):
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
                 model
+            nn_params (list of dicts): each dict specifies parameters of a layer
+                for building the neural network
 
         """
 
@@ -824,20 +842,68 @@ class FLDS(LDS):
             dim_obs=dim_obs, dim_latent=dim_latent, num_time_pts=num_time_pts,
             post_z_samples=post_z_samples, gen_params=gen_params)
 
+        if nn_params is None:
+            nn_params = [{}]
+        self._parse_nn_options(nn_params)
+
+    def _parse_nn_options(self, nn_options):
+        """Specify architecture of decoding network and set defaults"""
+
+        self.nn_params = []
+        for layer_num, layer_options in enumerate(nn_options):
+            layer_params = dict(self._layer_defaults)
+            layer_params['name'] = str('layer_%02i' % layer_num)
+            # replace defaults with user-supplied options
+            for key, value in layer_options.items():
+                layer_params[key] = value
+            # translate from strings to tf operations
+            for key, value in layer_params.items():
+                if value is not None:
+                    # otherwise use default
+                    if key is 'activation':
+                        if value is 'identity':
+                            value = None
+                        elif value is 'relu':
+                            value = tf.nn.relu
+                        elif value is 'softmax':
+                            value = tf.nn.softmax
+                        elif value is 'softplus':
+                            value = tf.nn.softplus
+                        elif value is 'sigmoid':
+                            value = tf.nn.sigmoid
+                        elif value is 'tanh':
+                            value = tf.nn.tanh
+                        else:
+                            raise ValueError(
+                                '"%s" is not a valid string for specifying '
+                                'the activation function' % value)
+                    elif key is 'kernel_initializer' \
+                            or key is 'bias_initializer':
+                        if value is 'normal':
+                            value = tf.initializers.random_normal(
+                                mean=0.0, stddev=0.1, dtype=self.dtype)
+                        elif value is 'trunc_normal':
+                            value = tf.initializers.truncated_normal(
+                                mean=0.0, stddev=0.1, dtype=self.dtype)
+                        elif value is 'zeros':
+                            value = tf.initializers.zeros(dtype=self.dtype)
+                        else:
+                            raise ValueError(
+                                '"%s" is not a valid string for specifying '
+                                'a variable initializer' % value)
+                # reassign (possibly new) value to key
+                layer_params[key] = value
+            # make sure output is correct
+            if layer_num == len(nn_options) - 1:
+                layer_params['units'] = self.dim_obs
+            self.nn_params.append(dict(layer_params))
+
     def _initialize_mapping(self):
         """Initialize mapping from latent space to observations"""
 
         # should eventually become user options
         tr_norm_initializer = tf.initializers.truncated_normal(
             mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-        activation = None
-        use_bias = True
-        kernel_initializer = tr_norm_initializer
-        bias_initializer = zeros_initializer
-        kernel_regularizer = None
-        bias_regularizer = None
-        num_layers = 1
 
         # square root of diagonal of observation covariance matrix
         # (assume diagonal)
@@ -855,22 +921,20 @@ class FLDS(LDS):
         self.R = tf.square(self.Rsqrt)
         self.Rinv = 1.0 / self.R
 
-        # observation matrix
-        # self.mapping = tf.layers.Dense(
-        #     units=self.dim_obs,
-        #     activation=None,
-        #     use_bias=True,
-        #     kernel_initializer=kernel_initializer,
-        #     bias_initializer=bias_initializer,
-        #     kernel_regularizer=kernel_regularizer,
-        #     bias_regularizer=bias_regularizer,
-        #     name='mapping')
-
+        # build mapping to observations
+        self.layers = []
+        for _, layer_params in enumerate(self.nn_params):
+            self.layers.append(tf.layers.Dense(**layer_params))
 
     def _apply_mapping(self, z_samples):
         """Apply model mapping from latent space to observations"""
-        return tf.add(tf.tensordot(z_samples, self.C, axes=[[3], [0]]), self.d)
-        # return self.mapping.apply(z_samples)
+
+        net_input = z_samples
+        for _, layer in enumerate(self.layers):
+            net_input = layer.apply(net_input)
+
+        return net_input
+
 
 class FLDSCoupled(LDSCoupled):
     pass
