@@ -339,7 +339,7 @@ class DynamicalModel(Model):
         self.dim_latent = self.gen_net.dim_latent
         self.num_time_pts = self.gen_net.num_time_pts
 
-    def build_graph(self, opt_params=None):
+    def build_graph(self):
         """Build tensorflow computation graph for model"""
         raise NotImplementedError
 

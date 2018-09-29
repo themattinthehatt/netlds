@@ -39,10 +39,6 @@ class GenerativeModel(object):
         """Evaluate log density of generative model"""
         raise NotImplementedError
 
-    def get_params(self, sess):
-        """Get parameters of generative model"""
-        raise NotImplementedError
-
     def sample(self, sess, num_samples=1, seed=None):
         """Draw samples from model"""
         raise NotImplementedError
@@ -50,14 +46,6 @@ class GenerativeModel(object):
 
 class LDS(GenerativeModel):
     """Linear dynamical system model with Gaussian observations"""
-
-    _layer_defaults = {
-        'units': 30,
-        'activation': 'tanh',
-        'kernel_initializer': 'trunc_normal',
-        'kernel_regularizer': None,
-        'bias_initializer': 'zeros',
-        'bias_regularizer': None}
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
@@ -83,6 +71,31 @@ class LDS(GenerativeModel):
             self.gen_params = {}
         else:
             self.gen_params = gen_params
+
+        # emissions matrix
+        if 'C' in self.gen_params:
+            kernel_initializer = tf.constant_initializer(
+                self.gen_params['C'], dtype=self.dtype)
+        else:
+            kernel_initializer = tf.initializers.truncated_normal(
+                mean=0.0, stddev=0.1, dtype=self.dtype)
+
+        # biases
+        if 'd' in self.gen_params:
+            bias_initializer = tf.constant_initializer(
+                self.gen_params['d'], dtype=self.dtype)
+        else:
+            bias_initializer = tf.initializers.zeros(dtype=self.dtype)
+
+        # list of dicts specifying (linear) nn to observations
+        self.nn_params = [{
+            'units': self.dim_obs,
+            'activation': None,
+            'kernel_initializer': kernel_initializer,
+            'bias_initializer': bias_initializer,
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'name': 'mapping'}]
 
     def build_graph(self, *args, **kwargs):
         """
@@ -155,11 +168,6 @@ class LDS(GenerativeModel):
                 initializer=self.gen_params['Q_sqrt'],
                 dtype=self.dtype)
         else:
-            # Q_sqrt = tf.get_variable(
-            #     'Q_sqrt',
-            #     shape=[self.dim_latent, self.dim_latent],
-            #     initializer=tr_norm_initializer,
-            #     dtype=self.dtype)
             self.Q_sqrt = tf.get_variable(
                 'Q_sqrt',
                 initializer=0.1 * np.eye(
@@ -174,11 +182,6 @@ class LDS(GenerativeModel):
                 initializer=self.gen_params['Q0_sqrt'],
                 dtype=self.dtype)
         else:
-            # Q0_sqrt = tf.get_variable(
-            #     'Q0_sqrt',
-            #     shape=[self.dim_latent, self.dim_latent],
-            #     initializer=tr_norm_initializer,
-            #     dtype=self.dtype)
             self.Q0_sqrt = tf.get_variable(
                 'Q0_sqrt',
                 initializer=0.1 * np.eye(
@@ -204,13 +207,6 @@ class LDS(GenerativeModel):
         tr_norm_initializer = tf.initializers.truncated_normal(
             mean=0.0, stddev=0.1, dtype=self.dtype)
         zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-        activation = None
-        use_bias = True
-        kernel_initializer = tr_norm_initializer
-        bias_initializer = zeros_initializer
-        kernel_regularizer = None
-        bias_regularizer = None
-        num_layers = 1
 
         # square root of diagonal of observation covariance matrix
         # (assume diagonal)
@@ -228,46 +224,19 @@ class LDS(GenerativeModel):
         self.R = tf.square(self.Rsqrt)
         self.Rinv = 1.0 / self.R
 
-        # observation matrix
-        # self.mapping = tf.layers.Dense(
-        #     units=self.dim_obs,
-        #     activation=None,
-        #     use_bias=True,
-        #     kernel_initializer=kernel_initializer,
-        #     bias_initializer=bias_initializer,
-        #     kernel_regularizer=kernel_regularizer,
-        #     bias_regularizer=bias_regularizer,
-        #     name='mapping')
-
-        if 'C' in self.gen_params:
-            self.C = tf.get_variable(
-                'C',
-                initializer=self.gen_params['C'],
-                dtype=self.dtype)
-        else:
-            self.C = tf.get_variable(
-                'C',
-                shape=[self.dim_latent, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
-
-        # biases
-        if 'd' in self.gen_params:
-            self.d = tf.get_variable(
-                'd',
-                initializer=self.gen_params['d'],
-                dtype=self.dtype)
-        else:
-            self.d = tf.get_variable(
-                'd',
-                shape=[1, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
+        # build mapping to observations
+        self.layers = []
+        for _, layer_params in enumerate(self.nn_params):
+            self.layers.append(tf.layers.Dense(**layer_params))
 
     def _apply_mapping(self, z_samples):
         """Apply model mapping from latent space to observations"""
-        return tf.add(tf.tensordot(z_samples, self.C, axes=[[3], [0]]), self.d)
-        # return self.mapping.apply(z_samples)
+
+        net_input = z_samples
+        for _, layer in enumerate(self.layers):
+            net_input = layer.apply(net_input)
+
+        return net_input
 
     def _sample_yz(self):
         """
@@ -432,13 +401,13 @@ class LDS(GenerativeModel):
     def get_params(self, sess):
         """Get parameters of generative model"""
 
-        A, C, d, Rsqrt, z0_mean, Q, Q0 = sess.run(
-            [self.A, self.C, self.d, self.Rsqrt, self.z0_mean,
+        A, layer_weights, Rsqrt, z0_mean, Q, Q0 = sess.run(
+            [self.A, self.layers[0].weights, self.Rsqrt, self.z0_mean,
              self.Q, self.Q0])
 
         param_dict = {
-            'A': A, 'C': C, 'd': d, 'R': np.square(Rsqrt),
-            'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+            'A': A, 'C': layer_weights[0], 'd': layer_weights[1],
+            'R': np.square(Rsqrt), 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
 
         return param_dict
 
@@ -555,11 +524,6 @@ class LDSCoupled(LDS):
                 initializer=self.gen_params['Q_sqrt'],
                 dtype=self.dtype)
         else:
-            # Q_sqrt = tf.get_variable(
-            #     'Q_sqrt',
-            #     shape=[self.dim_latent, self.dim_latent],
-            #     initializer=tr_norm_initializer,
-            #     dtype=self.dtype)
             Q_sqrt = tf.get_variable(
                 'Q_sqrt',
                 initializer=np.eye(
@@ -574,11 +538,6 @@ class LDSCoupled(LDS):
                 initializer=self.gen_params['Q0_sqrt'],
                 dtype=self.dtype)
         else:
-            # Q0_sqrt = tf.get_variable(
-            #     'Q0_sqrt',
-            #     shape=[self.dim_latent, self.dim_latent],
-            #     initializer=tr_norm_initializer,
-            #     dtype=self.dtype)
             Q0_sqrt = tf.get_variable(
                 'Q0_sqrt',
                 initializer=np.eye(
@@ -628,68 +587,16 @@ class PLDS(LDS):
         elif spiking_nl is 'relu':
             self.spiking_nl = tf.nn.relu
         else:
-            raise ValueError('"%s" is not a valid spiking nonlinearity' %
-                             spiking_nl)
+            raise ValueError(
+                '"%s" is not a valid spiking nonlinearity' % spiking_nl)
 
     def _initialize_mapping(self):
         """Initialize mapping from latent space to observations"""
 
-        # should eventually become user options
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-        activation = None
-        use_bias = True
-        kernel_initializer = tr_norm_initializer
-        bias_initializer = zeros_initializer
-        kernel_regularizer = None
-        bias_regularizer = None
-        num_layers = 1
-
-        # observation matrix
-        # self.mapping = tf.layers.Dense(
-        #     units=self.dim_obs,
-        #     activation=None,
-        #     use_bias=True,
-        #     kernel_initializer=kernel_initializer,
-        #     bias_initializer=bias_initializer,
-        #     kernel_regularizer=kernel_regularizer,
-        #     bias_regularizer=bias_regularizer,
-        #     name='mapping')
-
-        if 'C' in self.gen_params:
-            self.C = tf.get_variable(
-                'C',
-                initializer=self.gen_params['C'],
-                dtype=self.dtype)
-        else:
-            self.C = tf.get_variable(
-                'C',
-                shape=[self.dim_latent, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
-
-        # biases
-        if 'd' in self.gen_params:
-            self.d = tf.get_variable(
-                'd',
-                initializer=self.gen_params['d'],
-                dtype=self.dtype)
-        else:
-            self.d = tf.get_variable(
-                'd',
-                shape=[1, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
-
-    def _apply_mapping(self, z_samples):
-        """Apply model mapping from latent space to observations"""
-
-        layer_output = tf.add(
-            tf.tensordot(z_samples, self.C, axes=[[3], [0]]), self.d)
-        self.rate = self.spiking_nl(layer_output)
-
-        return self.rate
+        # build mapping to observations
+        self.layers = []
+        for _, layer_params in enumerate(self.nn_params):
+            self.layers.append(tf.layers.Dense(**layer_params))
 
     def _sample_yz(self):
         """
@@ -763,7 +670,7 @@ class PLDS(LDS):
         """Get parameters of generative model"""
 
         A, C, d, z0_mean, Q, Q0 = sess.run(
-            [self.A, self.C, self.d, self.z0_mean, self.Q, self.Q0])
+            [self.A, self.layers[0].weights, self.z0_mean, self.Q, self.Q0])
 
         param_dict = {
             'A': A, 'C': C, 'd': d, 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
@@ -898,46 +805,30 @@ class FLDS(LDS):
                 layer_params['units'] = self.dim_obs
             self.nn_params.append(dict(layer_params))
 
-    def _initialize_mapping(self):
-        """Initialize mapping from latent space to observations"""
 
-        # should eventually become user options
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
+class FLDSCoupled(LDSCoupled, FLDS):
 
-        # square root of diagonal of observation covariance matrix
-        # (assume diagonal)
-        if 'Rsqrt' in self.gen_params:
-            self.Rsqrt = tf.get_variable(
-                'Rsqrt',
-                initializer=self.gen_params['Rsqrt'],
-                dtype=self.dtype)
-        else:
-            self.Rsqrt = tf.get_variable(
-                'Rsqrt',
-                shape=[1, self.dim_obs],
-                initializer=tr_norm_initializer,
-                dtype=self.dtype)
-        self.R = tf.square(self.Rsqrt)
-        self.Rinv = 1.0 / self.R
+    def __init__(
+            self, dim_obs=None, dim_latent=None, post_z_samples=None,
+            num_time_pts=None, gen_params=None, nn_params=None):
+        """
+        Generative model is defined as
+            z_t = A z_{t-1} + \eps
+            y_t = f(z_t) + \eta
 
-        # build mapping to observations
-        self.layers = []
-        for _, layer_params in enumerate(self.nn_params):
-            self.layers.append(tf.layers.Dense(**layer_params))
+        Args:
+            num_time_pts (int): number of time points per observation of the
+                dynamical sequence
+            gen_params (dict): dictionary of generative params for initializing
+                model
+            nn_params
 
-    def _apply_mapping(self, z_samples):
-        """Apply model mapping from latent space to observations"""
+        """
 
-        net_input = z_samples
-        for _, layer in enumerate(self.layers):
-            net_input = layer.apply(net_input)
-
-        return net_input
-
-
-class FLDSCoupled(LDSCoupled):
-    pass
+        FLDS.__init__(
+            self, dim_obs=dim_obs, dim_latent=dim_latent,
+            gen_params=gen_params, num_time_pts=num_time_pts,
+            post_z_samples=post_z_samples, nn_params=nn_params)
 
 
 class PFLDS(PLDS):
