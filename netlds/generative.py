@@ -2,10 +2,14 @@
 
 import numpy as np
 import tensorflow as tf
+from netlds.network import Network
 
 
 class GenerativeModel(object):
     """Base class for generative models"""
+
+    # use same data type throughout graph construction
+    dtype = tf.float32
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
@@ -28,8 +32,6 @@ class GenerativeModel(object):
         # tf.Tensor that contains samples from the approximate posterior
         # (output of inference network)
         self.post_z_samples = post_z_samples
-        # use same data type throughout graph construction
-        self.dtype = tf.float32
 
     def build_graph(self, *args, **kwargs):
         """Build tensorflow computation graph for generative model"""
@@ -44,12 +46,13 @@ class GenerativeModel(object):
         raise NotImplementedError
 
 
-class LDS(GenerativeModel):
+class FLDS(GenerativeModel):
     """Linear dynamical system model with Gaussian observations"""
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
+            num_time_pts=None, gen_params=None, nn_params=None,
+            noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -73,39 +76,22 @@ class LDS(GenerativeModel):
         else:
             self.gen_params = gen_params
 
-        # emissions matrix
-        if 'C' in self.gen_params:
-            kernel_initializer = tf.constant_initializer(
-                self.gen_params['C'], dtype=self.dtype)
-        else:
-            kernel_initializer = tf.initializers.truncated_normal(
-                mean=0.0, stddev=0.1, dtype=self.dtype)
-
-        # biases
-        if 'd' in self.gen_params:
-            bias_initializer = tf.constant_initializer(
-                self.gen_params['d'], dtype=self.dtype)
-        else:
-            bias_initializer = tf.initializers.zeros(dtype=self.dtype)
-
         # spiking nl
         self.noise_dist = noise_dist
         if noise_dist is 'gaussian':
-            activation = None
+            activation = 'linear'
         elif noise_dist is 'poisson':
-            activation = tf.nn.softplus
+            activation = 'softplus'
         else:
             raise ValueError
 
-        # list of dicts specifying (linear) nn to observations
-        self.nn_params = [{
-            'units': self.dim_obs,
-            'activation': activation,
-            'kernel_initializer': kernel_initializer,
-            'bias_initializer': bias_initializer,
-            'kernel_regularizer': None,
-            'bias_regularizer': None,
-            'name': 'mapping'}]
+        if nn_params is None:
+            # use Network defaults
+            nn_params = [{}]
+        nn_params[-1]['activation'] = activation
+
+        # build network
+        self.network = Network(output_dim=dim_obs, nn_params=nn_params)
 
     def build_graph(self, *args, **kwargs):
         """
@@ -131,9 +117,9 @@ class LDS(GenerativeModel):
 
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
-            self._initialize_mapping()
+            self.network.build_graph()
+            self.y_pred = self.network.apply_network(z_samples)
             self._initialize_noise_dist_vars()
-            self.y_pred = self._apply_mapping(z_samples)
 
         # define branch of graph for evaluating prior model
         with tf.variable_scope('generative_samples'):
@@ -234,21 +220,6 @@ class LDS(GenerativeModel):
             self.R = tf.square(self.Rsqrt)
             self.Rinv = 1.0 / self.R
 
-    def _initialize_mapping(self):
-        """Initialize mapping from latent space to observations"""
-        self.layers = []
-        for _, layer_params in enumerate(self.nn_params):
-            self.layers.append(tf.layers.Dense(**layer_params))
-
-    def _apply_mapping(self, z_samples):
-        """Apply model mapping from latent space to observations"""
-
-        net_input = z_samples
-        for _, layer in enumerate(self.layers):
-            net_input = layer.apply(net_input)
-
-        return net_input
-
     def _sample_yz(self):
         """
         Define branch of tensorflow computation graph for sampling from the
@@ -280,7 +251,7 @@ class LDS(GenerativeModel):
                 expanded_z = tf.expand_dims(
                     tf.expand_dims(z_val, axis=1), axis=1)
                 y_val = tf.squeeze(
-                    self._apply_mapping(expanded_z), axis=[1, 2]) \
+                    self.network.apply_network(expanded_z), axis=[1, 2]) \
                     + tf.multiply(rand_y, self.Rsqrt)
 
                 return [z_val, y_val]
@@ -291,7 +262,8 @@ class LDS(GenerativeModel):
                             tf.transpose(self.Q0_sqrt))
             # expand dims to account for time and mc dims when applying mapping
             expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-            y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2]) \
+            y0 = tf.squeeze(self.network.apply_network(expanded_z0),
+                            axis=[1, 2]) \
                 + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
 
             # scan over time points, not samples
@@ -324,7 +296,7 @@ class LDS(GenerativeModel):
                 # expand dims to account for time and mc dims with mapping
                 expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1),
                                             axis=1)
-                y_val = tf.squeeze(self._apply_mapping(expanded_z),
+                y_val = tf.squeeze(self.network.apply_network(expanded_z),
                                    axis=[1, 2])
 
                 return [z_val, y_val]
@@ -335,7 +307,7 @@ class LDS(GenerativeModel):
                              tf.transpose(self.Q0_sqrt))
             # expand dims to account for time and mc dims when applying mapping
             expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-            y0 = tf.squeeze(self._apply_mapping(expanded_z0), axis=[1, 2])
+            y0 = tf.squeeze(self.network.apply_network(expanded_z0), axis=[1, 2])
 
             # scan over time points, not samples
             rand_ph_shuff = tf.transpose(
@@ -361,7 +333,7 @@ class LDS(GenerativeModel):
         p(y, z) = p(y | z) p(z)
         where
         p(z) = \prod_t p(z_t), z_t ~ N(A z_{t-1}, Q)
-        p(y | z) = \prod_t p(y_t | z_t), y_t | z_t ~ N(C z_t + d, R)
+        p(y | z) = \prod_t p(y_t | z_t)
 
         Args:
             y (batch_size x num_mc_samples x num_time_pts x dim_obs tf.Tensor)
@@ -480,15 +452,15 @@ class LDS(GenerativeModel):
 
         if self.noise_dist is 'gaussian':
             A, layer_weights, Rsqrt, z0_mean, Q, Q0 = sess.run(
-                [self.A, self.layers[0].weights, self.Rsqrt, self.z0_mean,
-                 self.Q, self.Q0])
+                [self.A, self.network.layers[0].weights, self.Rsqrt,
+                 self.z0_mean, self.Q, self.Q0])
 
             param_dict = {
                 'A': A, 'C': layer_weights[0], 'd': layer_weights[1],
                 'R': np.square(Rsqrt), 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
         elif self.noise_dist is 'poisson':
             A, C, d, z0_mean, Q, Q0 = sess.run(
-                [self.A, self.layers[0].weights, self.z0_mean, self.Q,
+                [self.A, self.network.layers[0].weights, self.z0_mean, self.Q,
                  self.Q0])
 
             param_dict = {
@@ -499,7 +471,7 @@ class LDS(GenerativeModel):
         return param_dict
 
 
-class LDSCoupled(LDS):
+class FLDSCoupled(FLDS):
     """
     Linear dynamical system model with Gaussian observations; model parameters
     are coupled to parameters of approximate posterior SmoothingLDSCoupled
@@ -508,7 +480,8 @@ class LDSCoupled(LDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
+            num_time_pts=None, gen_params=None, nn_params=None,
+            noise_dist='gaussian'):
         """
         Generative model is defined as
             z_t = A z_{t-1} + \eps
@@ -525,7 +498,7 @@ class LDSCoupled(LDS):
         super().__init__(
             dim_obs=dim_obs, dim_latent=dim_latent, gen_params=gen_params,
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
-            noise_dist=noise_dist)
+            nn_params=nn_params, noise_dist=noise_dist)
 
     def build_graph(
             self, z_samples, z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv):
@@ -565,9 +538,9 @@ class LDSCoupled(LDS):
 
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
-            self._initialize_mapping()
+            self.network.build_graph()
+            self.y_pred = self.network.apply_network(z_samples)
             self._initialize_noise_dist_vars()
-            self.y_pred = self._apply_mapping(z_samples)
 
         # define branch of graph for evaluating prior model
         with tf.variable_scope('generative_samples'):
@@ -642,124 +615,77 @@ class LDSCoupled(LDS):
         return z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv
 
 
-class FLDS(LDS):
-    """
-    Linear dynamical system model with neural network transformation to output
-    and Gaussian observations
-    """
-
-    _layer_defaults = {
-        'units': 30,
-        'activation': 'tanh',
-        'kernel_initializer': 'trunc_normal',
-        'kernel_regularizer': None,
-        'bias_initializer': 'zeros',
-        'bias_regularizer': None}
+class LDS(FLDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, nn_params=None,
-            noise_dist='gaussian'):
-        """
-        Generative model is defined as
-            z_t = A z_{t-1} + \eps
-            y_t = f(z_t) + \eta
-        where f() is parameterized with a neural network
+            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
 
-        Args:
-            num_time_pts (int): number of time points per observation of the
-                dynamical sequence
-            gen_params (dict): dictionary of generative params for initializing
-                model
-            nn_params (list of dicts): each dict specifies parameters of a layer
-                for building the neural network
+        if gen_params is None:
+            gen_params = {}
 
-        """
+        # emissions matrix
+        if 'C' in gen_params:
+            kernel_initializer = tf.constant_initializer(
+                gen_params['C'], dtype=self.dtype)
+        else:
+            kernel_initializer = 'trunc_normal'
+
+        # biases
+        if 'd' in gen_params:
+            bias_initializer = tf.constant_initializer(
+                gen_params['d'], dtype=self.dtype)
+        else:
+            bias_initializer = 'zeros'
+
+        # list of dicts specifying (linear) nn to observations
+        nn_params = [{
+            'units': dim_obs,
+            'activation': 'linear',
+            'kernel_initializer': kernel_initializer,
+            'bias_initializer': bias_initializer,
+            'kernel_regularizer': None,
+            'bias_regularizer': None}]
 
         super().__init__(
-            dim_obs=dim_obs, dim_latent=dim_latent, num_time_pts=num_time_pts,
-            post_z_samples=post_z_samples, gen_params=gen_params,
-            noise_dist=noise_dist)
-
-        if nn_params is None:
-            nn_params = [{}]
-        self._parse_nn_options(nn_params)
-
-    def _parse_nn_options(self, nn_options):
-        """Specify architecture of decoding network and set defaults"""
-
-        self.nn_params = []
-        for layer_num, layer_options in enumerate(nn_options):
-            layer_params = dict(self._layer_defaults)
-            layer_params['name'] = str('layer_%02i' % layer_num)
-            # replace defaults with user-supplied options
-            for key, value in layer_options.items():
-                layer_params[key] = value
-            # translate from strings to tf operations
-            for key, value in layer_params.items():
-                if value is not None:
-                    # otherwise use default
-                    if key is 'activation':
-                        if value is 'identity':
-                            value = None
-                        elif value is 'relu':
-                            value = tf.nn.relu
-                        elif value is 'softmax':
-                            value = tf.nn.softmax
-                        elif value is 'softplus':
-                            value = tf.nn.softplus
-                        elif value is 'sigmoid':
-                            value = tf.nn.sigmoid
-                        elif value is 'tanh':
-                            value = tf.nn.tanh
-                        else:
-                            raise ValueError(
-                                '"%s" is not a valid string for specifying '
-                                'the activation function' % value)
-                    elif key is 'kernel_initializer' \
-                            or key is 'bias_initializer':
-                        if value is 'normal':
-                            value = tf.initializers.random_normal(
-                                mean=0.0, stddev=0.1, dtype=self.dtype)
-                        elif value is 'trunc_normal':
-                            value = tf.initializers.truncated_normal(
-                                mean=0.0, stddev=0.1, dtype=self.dtype)
-                        elif value is 'zeros':
-                            value = tf.initializers.zeros(dtype=self.dtype)
-                        else:
-                            raise ValueError(
-                                '"%s" is not a valid string for specifying '
-                                'a variable initializer' % value)
-                # reassign (possibly new) value to key
-                layer_params[key] = value
-            # make sure output is correct
-            if layer_num == len(nn_options) - 1:
-                layer_params['units'] = self.dim_obs
-            self.nn_params.append(dict(layer_params))
+            dim_obs=dim_obs, dim_latent=dim_latent,
+            post_z_samples=post_z_samples, num_time_pts=num_time_pts,
+            gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
 
 
-class FLDSCoupled(LDSCoupled, FLDS):
+class LDSCoupled(FLDSCoupled):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, nn_params=None,
-            noise_dist='gaussian'):
-        """
-        Generative model is defined as
-            z_t = A z_{t-1} + \eps
-            y_t = f(z_t) + \eta
+            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
 
-        Args:
-            num_time_pts (int): number of time points per observation of the
-                dynamical sequence
-            gen_params (dict): dictionary of generative params for initializing
-                model
-            nn_params
+        if gen_params is None:
+            gen_params = {}
 
-        """
+        # emissions matrix
+        if 'C' in gen_params:
+            kernel_initializer = tf.constant_initializer(
+                gen_params['C'], dtype=self.dtype)
+        else:
+            kernel_initializer = 'trunc_normal'
 
-        FLDS.__init__(
-            self, dim_obs=dim_obs, dim_latent=dim_latent,
-            gen_params=gen_params, num_time_pts=num_time_pts,
-            post_z_samples=post_z_samples, nn_params=nn_params,
-            noise_dist=noise_dist,)
+        # biases
+        if 'd' in gen_params:
+            bias_initializer = tf.constant_initializer(
+                gen_params['d'], dtype=self.dtype)
+        else:
+            bias_initializer = 'zeros'
+
+        # list of dicts specifying (linear) nn to observations
+        nn_params = [{
+            'units': dim_obs,
+            'activation': 'linear',
+            'kernel_initializer': kernel_initializer,
+            'bias_initializer': bias_initializer,
+            'kernel_regularizer': None,
+            'bias_regularizer': None}]
+
+        super().__init__(
+            dim_obs=dim_obs, dim_latent=dim_latent,
+            post_z_samples=post_z_samples, num_time_pts=num_time_pts,
+            gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)

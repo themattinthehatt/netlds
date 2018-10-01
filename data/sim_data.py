@@ -56,18 +56,17 @@ def build_model(
         'num_time_pts': num_time_pts}
 
     # specify probabilistic model
+    gen_model = LDSCoupled
     if obs_noise is 'gaussian':
         R_sqrt = np.sqrt(0.05 * np.random.uniform(
             size=(1, dim_obs)).astype(dtype))
         gen_params['R_sqrt'] = R_sqrt
-        gen_model = LDSCoupled
-    else:
-        gen_model = PLDSCoupled
 
     gen_model_params = {
         'dim_obs': dim_obs,
         'dim_latent': dim_latent,
         'num_time_pts': num_time_pts,
+        'noise_dist': obs_noise,
         'gen_params': gen_params}
 
     # initialize model

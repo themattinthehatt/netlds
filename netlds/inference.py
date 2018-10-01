@@ -2,12 +2,16 @@
 
 import numpy as np
 import tensorflow as tf
+from netlds.network import Network
 from netlds.chol_utils import blk_tridiag_chol, blk_chol_inv, \
     blk_chol_inv_multi
 
 
 class InferenceNetwork(object):
     """Base class for inference networks"""
+
+    # use same data type throughout graph construction
+    dtype = tf.float32
 
     def __init__(
             self, dim_input=None, dim_latent=None, num_mc_samples=1):
@@ -26,8 +30,6 @@ class InferenceNetwork(object):
         self.dim_input = dim_input
         self.dim_latent = dim_latent
         self.num_mc_samples = num_mc_samples
-        # use same data type throughout graph construction
-        self.dtype = tf.float32
 
     def build_graph(self, *args, **kwargs):
         """Build tensorflow computation graph for inference network"""
@@ -50,13 +52,14 @@ class SmoothingLDS(InferenceNetwork):
 
     def __init__(
             self, dim_input=None, dim_latent=None, num_mc_samples=1,
-            num_time_pts=None):
+            num_time_pts=None, nn_params=None):
 
         super(SmoothingLDS, self).__init__(
             dim_input=dim_input, dim_latent=dim_latent,
             num_mc_samples=num_mc_samples)
 
         self.num_time_pts = num_time_pts
+        self.nn_params = nn_params
 
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
@@ -165,61 +168,52 @@ class SmoothingLDS(InferenceNetwork):
 
     def _build_inference_mlp(self):
 
-        # should eventually become user options
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-        activation = tf.nn.tanh
-        use_bias = True
-        kernel_initializer = tr_norm_initializer
-        bias_initializer = zeros_initializer
-        kernel_regularizer = None
-        bias_regularizer = None
-        num_layers = 2
+        # default network
+        if self.nn_params is None:
+            layer_params = {
+                'units': 30,
+                'activation': 'tanh',
+                'kernel_initializer': 'trunc_normal',
+                'kernel_regularizer': None,
+                'bias_initializer': 'zeros',
+                'bias_regularizer': None}
+            self.nn_params = [layer_params, layer_params]
 
-        # store layers in a list
-        self.layers = []
-        for l in range(num_layers):
-            self.layers.append(tf.layers.Dense(
-                units=30,
-                activation=activation,
-                use_bias=use_bias,
-                kernel_initializer=kernel_initializer,
-                bias_initializer=bias_initializer,
-                kernel_regularizer=kernel_regularizer,
-                bias_regularizer=bias_regularizer,
-                name='layer_%02i' % l))
+        self.network = Network(
+            output_dim=30, nn_params=self.nn_params)
+        self.network.build_graph()
 
-        self.layer_z_mean = tf.layers.Dense(
-            units=self.dim_latent,
-            activation=None,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name='layer_z_mean')
-        self.layer_z_vars = tf.layers.Dense(
-            units=self.dim_latent * self.dim_latent,
-            activation=None,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name='layer_z_vars')
+        layer_z_mean_params = [{
+            'units': self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None}]
+        self.layer_z_mean = Network(
+            output_dim=self.dim_latent, nn_params=layer_z_mean_params)
+        self.layer_z_mean.build_graph()
+
+        layer_z_var_params = [{
+            'units': self.dim_latent * self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None}]
+        self.layer_z_vars = Network(
+            output_dim=self.dim_latent * self.dim_latent,
+            nn_params=layer_z_var_params)
+        self.layer_z_vars.build_graph()
 
         # compute layer outputs from inference network input
-        layer_input = self.input_ph
-        for l in range(num_layers):
-            layer_input = self.layers[l].apply(layer_input)
-        self.hidden_act = layer_input
+        self.hidden_act = self.network.apply_network(self.input_ph)
 
         # get data-dependent mean
-        self.m_psi = self.layer_z_mean.apply(self.hidden_act)
+        self.m_psi = self.layer_z_mean.apply_network(self.hidden_act)
 
         # get sqrt of inverse of data-dependent covariances
-        r_psi_sqrt = self.layer_z_vars.apply(self.hidden_act)
+        r_psi_sqrt = self.layer_z_vars.apply_network(self.hidden_act)
         self.r_psi_sqrt = tf.reshape(
             r_psi_sqrt,
             [-1, self.num_time_pts, self.dim_latent, self.dim_latent])
