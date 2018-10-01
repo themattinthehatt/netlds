@@ -189,7 +189,8 @@ class SmoothingLDS(InferenceNetwork):
             'kernel_initializer': 'trunc_normal',
             'kernel_regularizer': None,
             'bias_initializer': 'zeros',
-            'bias_regularizer': None}]
+            'bias_regularizer': None,
+            'name': 'z_means'}]
         self.layer_z_mean = Network(
             output_dim=self.dim_latent, nn_params=layer_z_mean_params)
         self.layer_z_mean.build_graph()
@@ -200,7 +201,8 @@ class SmoothingLDS(InferenceNetwork):
             'kernel_initializer': 'trunc_normal',
             'kernel_regularizer': None,
             'bias_initializer': 'zeros',
-            'bias_regularizer': None}]
+            'bias_regularizer': None,
+            'name': 'z_stddev'}]
         self.layer_z_vars = Network(
             output_dim=self.dim_latent * self.dim_latent,
             nn_params=layer_z_var_params)

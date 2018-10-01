@@ -19,6 +19,10 @@ class Network(object):
 
     def __init__(self, output_dim, nn_params=None):
 
+        if nn_params is None:
+            # use all defaults with a single layer
+            nn_params = [{}]
+
         self.output_dim = output_dim
         self._parse_nn_options(nn_params)
         self.layers = []
@@ -28,11 +32,16 @@ class Network(object):
 
         self.nn_params = []
         for layer_num, layer_options in enumerate(nn_options):
+
+            # start with _layer_defaults
             layer_params = dict(self._layer_defaults)
+            # update default name
             layer_params['name'] = str('layer_%02i' % layer_num)
+
             # replace defaults with user-supplied options
             for key, value in layer_options.items():
                 layer_params[key] = value
+
             # translate from strings to tf operations
             for key, value in layer_params.items():
                 if value is not None:
@@ -73,10 +82,10 @@ class Network(object):
                             raise ValueError(
                                 '"%s" is not a valid string for specifying '
                                 'a variable initializer' % value)
-
                 # reassign (possibly new) value to key
                 layer_params[key] = value
-            # make sure output is correct
+
+            # make sure output is correct size
             if layer_num == len(nn_options) - 1:
                 layer_params['units'] = self.output_dim
             self.nn_params.append(dict(layer_params))

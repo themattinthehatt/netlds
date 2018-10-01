@@ -233,99 +233,53 @@ class FLDS(GenerativeModel):
             shape=[self.num_samples_ph, self.num_time_pts, self.dim_latent],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='latent_rand_samples')
 
-        if self.noise_dist is 'gaussian':
+        # get random samples from latent space
+        def lds_update(outputs, inputs):
 
+            z_val = outputs
+            rand_z = inputs
+
+            z_val = tf.matmul(z_val, tf.transpose(self.A)) \
+                    + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
+
+            return z_val
+
+        # calculate samples for first time point
+        z0_samples = self.z0_mean \
+                     + tf.matmul(self.latent_rand_samples[:, 0, :],
+                                 tf.transpose(self.Q0_sqrt))
+
+        # scan over time points, not samples
+        rand_ph_shuff = tf.transpose(
+            self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
+        z_samples = tf.scan(
+            fn=lds_update,
+            elems=rand_ph_shuff,
+            initializer=z0_samples)
+
+        # concat across time (num_samples x num_time_pts x dim_latent)
+        self.z_samples_prior = tf.concat(
+            [tf.expand_dims(z0_samples, axis=1),
+             tf.transpose(z_samples, perm=[1, 0, 2])], axis=1)
+
+        # expand dims to account for time and mc dims when applying mapping
+        # now (1 x num_samples x num_time_pts x dim_latent)
+        z_samples_ex = tf.expand_dims(self.z_samples_prior, axis=0)
+        y_means = tf.squeeze(self.network.apply_network(z_samples_ex),
+                             axis=0)
+
+        # get random samples from observation space
+        if self.noise_dist is 'gaussian':
             self.obs_rand_samples = tf.random_normal(
                 shape=[self.num_samples_ph, self.num_time_pts, self.dim_obs],
                 mean=0.0, stddev=1.0, dtype=self.dtype,
                 name='obs_rand_samples')
-
-            def lds_update(outputs, inputs):
-
-                [z_val, y_val] = outputs
-                [rand_z, rand_y] = inputs
-
-                z_val = tf.matmul(z_val, tf.transpose(self.A)) \
-                    + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
-                # expand dims to account for time and mc dims with mapping
-                expanded_z = tf.expand_dims(
-                    tf.expand_dims(z_val, axis=1), axis=1)
-                y_val = tf.squeeze(
-                    self.network.apply_network(expanded_z), axis=[1, 2]) \
-                    + tf.multiply(rand_y, self.Rsqrt)
-
-                return [z_val, y_val]
-
-            # calculate samples for first time point
-            z0 = self.z0_mean \
-                + tf.matmul(self.latent_rand_samples[:, 0, :],
-                            tf.transpose(self.Q0_sqrt))
-            # expand dims to account for time and mc dims when applying mapping
-            expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-            y0 = tf.squeeze(self.network.apply_network(expanded_z0),
-                            axis=[1, 2]) \
-                + tf.multiply(self.obs_rand_samples[:, 0, :], self.Rsqrt)
-
-            # scan over time points, not samples
-            rand_ph_shuff = tf.transpose(
-                self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
-            obs_noise_ph_shuff = tf.transpose(
-                self.obs_rand_samples[:, 1:, :], perm=[1, 0, 2])
-            samples = tf.scan(
-                fn=lds_update,
-                elems=[rand_ph_shuff, obs_noise_ph_shuff],
-                initializer=[z0, y0])
-
-            z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
-            y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
-
-            self.z_samples_prior = tf.concat(
-                [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
-            self.y_samples_prior = tf.concat(
-                [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
+            self.y_samples_prior = y_means + tf.multiply(self.obs_rand_samples,
+                                                         self.Rsqrt)
 
         elif self.noise_dist is 'poisson':
-
-            def lds_update(outputs, inputs):
-
-                [z_val, y_val] = outputs
-                rand_z = inputs
-
-                z_val = tf.matmul(z_val, tf.transpose(self.A)) \
-                        + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
-                # expand dims to account for time and mc dims with mapping
-                expanded_z = tf.expand_dims(tf.expand_dims(z_val, axis=1),
-                                            axis=1)
-                y_val = tf.squeeze(self.network.apply_network(expanded_z),
-                                   axis=[1, 2])
-
-                return [z_val, y_val]
-
-            # calculate samples for first time point
-            z0 = self.z0_mean \
-                 + tf.matmul(self.latent_rand_samples[:, 0, :],
-                             tf.transpose(self.Q0_sqrt))
-            # expand dims to account for time and mc dims when applying mapping
-            expanded_z0 = tf.expand_dims(tf.expand_dims(z0, axis=1), axis=1)
-            y0 = tf.squeeze(self.network.apply_network(expanded_z0), axis=[1, 2])
-
-            # scan over time points, not samples
-            rand_ph_shuff = tf.transpose(
-                self.latent_rand_samples[:, 1:, :], perm=[1, 0, 2])
-            samples = tf.scan(
-                fn=lds_update,
-                elems=rand_ph_shuff,
-                initializer=[z0, y0])
-
-            z_samples_unshuff = tf.transpose(samples[0], perm=[1, 0, 2])
-            y_samples_unshuff = tf.transpose(samples[1], perm=[1, 0, 2])
-
-            self.z_samples_prior = tf.concat(
-                [tf.expand_dims(z0, axis=1), z_samples_unshuff], axis=1)
-            y_samples_prior = tf.concat(
-                [tf.expand_dims(y0, axis=1), y_samples_unshuff], axis=1)
             self.y_samples_prior = tf.squeeze(tf.random_poisson(
-                lam=y_samples_prior, shape=[1], dtype=self.dtype), axis=0)
+                lam=y_means, shape=[1], dtype=self.dtype), axis=0)
 
     def log_density(self, y, z):
         """
