@@ -4,7 +4,6 @@ import numpy as np
 import tensorflow as tf
 from netlds.models import *
 from netlds.generative import *
-from netlds.generativemulti import *
 from netlds.inference import *
 
 DTYPE = np.float32
@@ -48,14 +47,14 @@ def build_model(
         'C': C, 'd': d}
 
     # specify inference network for approximate posterior
-    inf_network = SmoothingLDSCoupled
+    inf_network = SmoothingLDS
     inf_network_params = {
         'dim_input': dim_obs,
         'dim_latent': dim_latent,
         'num_time_pts': num_time_pts}
 
     # specify probabilistic model
-    gen_model = LDSCoupled
+    gen_model = LDS
     if obs_noise is 'gaussian':
         R_sqrt = np.sqrt(0.05 * np.random.uniform(
             size=(1, dim_obs)).astype(DTYPE))
@@ -69,9 +68,10 @@ def build_model(
         'gen_params': gen_params}
 
     # initialize model
-    model = LDSCoupledModel(
+    model = LDSModel(
         inf_network=inf_network, inf_network_params=inf_network_params,
-        gen_model=gen_model, gen_model_params=gen_model_params)
+        gen_model=gen_model, gen_model_params=gen_model_params,
+        couple_params=True)
 
     return model
 
@@ -123,14 +123,14 @@ def build_model_multi(
         'C': C, 'd': d}
 
     # specify inference network for approximate posterior
-    inf_network = SmoothingLDSCoupled
+    inf_network = SmoothingLDS
     inf_network_params = {
         'dim_input': dim_obs_all,
         'dim_latent': dim_latent_all,
         'num_time_pts': num_time_pts}
 
     # specify probabilistic model
-    gen_model = NetLDSCoupled
+    gen_model = NetLDS
     if obs_noise is 'gaussian':
         R_sqrt = []
         for _, pop_dim in enumerate(dim_obs):
@@ -146,9 +146,10 @@ def build_model_multi(
         'gen_params': gen_params}
 
     # initialize model
-    model = LDSCoupledModel(
+    model = LDSModel(
         inf_network=inf_network, inf_network_params=inf_network_params,
-        gen_model=gen_model, gen_model_params=gen_model_params)
+        gen_model=gen_model, gen_model_params=gen_model_params,
+        couple_params=True)
 
     # actually initialize layers
     for pop, _ in enumerate(dim_latent):
@@ -175,8 +176,5 @@ def get_random_rotation_matrix(dim):
         out[:2, :2] = rot
         q = np.linalg.qr(np.random.randn(dim, dim))[0]
         A = q.dot(out).dot(q.T)
-
-    # q = np.linalg.qr(np.random.randn(dim, dim))[0]
-    # A = q
 
     return 0.95 * A.astype(DTYPE)

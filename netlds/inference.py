@@ -101,12 +101,18 @@ class SmoothingLDS(InferenceNetwork):
             output_dim=self.dim_latent * self.dim_latent,
             nn_params=layer_z_var_params)
 
-    def build_graph(self, *args):
+    def build_graph(self, param_dict):
         """Build tensorflow computation graph for inference network"""
 
-        # initialize variables that are *not* shared with generative model
-        with tf.variable_scope('model_params'):
-            self._initialize_model_vars()
+        # set prior variables generated elsewhere
+        self.z0_mean = param_dict['z0_mean']
+        self.A = param_dict['A']
+        self.Q0_sqrt = param_dict['Q0_sqrt']
+        self.Q_sqrt = param_dict['Q_sqrt']
+        self.Q0 = param_dict['Q0']
+        self.Q = param_dict['Q']
+        self.Q0_inv = param_dict['Q0_inv']
+        self.Q_inv = param_dict['Q_inv']
 
         # construct data pipeline
         with tf.variable_scope('inference_input'):
@@ -123,77 +129,6 @@ class SmoothingLDS(InferenceNetwork):
 
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
-
-    def _initialize_model_vars(self):
-        """Initialize variables of model prior"""
-
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-
-        # lazy for now; might want to have this as an option in the future
-        self.gen_params = {}
-
-        # mean of initial latent state
-        if 'z0_mean' in self.gen_params:
-            self.z0_mean = tf.get_variable(
-                'z0_mean',
-                initializer=self.gen_params['z0_mean'],
-                dtype=self.dtype)
-        else:
-            self.z0_mean = tf.get_variable(
-                'z0_mean',
-                shape=[1, self.dim_latent],
-                initializer=zeros_initializer,
-                dtype=self.dtype)
-
-        # means of transition matrix
-        if 'A' in self.gen_params:
-            self.A = tf.get_variable(
-                'A',
-                initializer=self.gen_params['A'],
-                dtype=self.dtype)
-        else:
-            self.A = tf.get_variable(
-                'A',
-                initializer=0.5 * np.eye(self.dim_latent,
-                                         dtype=self.dtype.as_numpy_dtype()),
-                dtype=self.dtype)
-
-        # square root of the innovation precision matrix
-        if 'Q_sqrt' in self.gen_params:
-            self.Q_sqrt = tf.get_variable(
-                'Q_sqrt',
-                initializer=self.gen_params['Q_sqrt'],
-                dtype=self.dtype)
-        else:
-            self.Q_sqrt = tf.get_variable(
-                'Q_sqrt',
-                initializer=np.eye(
-                    self.dim_latent,
-                    dtype=self.dtype.as_numpy_dtype()),
-                dtype=self.dtype)
-
-        # square root of the initial innovation precision matrix
-        if 'Q0_sqrt' in self.gen_params:
-            self.Q0_sqrt = tf.get_variable(
-                'Q0_sqrt',
-                initializer=self.gen_params['Q0_sqrt'],
-                dtype=self.dtype)
-        else:
-            self.Q0_sqrt = tf.get_variable(
-                'Q0_sqrt',
-                initializer=np.eye(
-                    self.dim_latent,
-                    dtype=self.dtype.as_numpy_dtype()),
-                dtype=self.dtype)
-
-        self.Q0 = tf.matmul(
-            self.Q0_sqrt, self.Q0_sqrt, transpose_b=True, name='Q0')
-        self.Q = tf.matmul(
-            self.Q_sqrt, self.Q_sqrt, transpose_b=True, name='Q')
-        self.Q0_inv = tf.matrix_inverse(self.Q0, name='Q0_inv')
-        self.Q_inv = tf.matrix_inverse(self.Q, name='Q_inv')
 
     def _initialize_inference_input(self):
 
@@ -394,52 +329,6 @@ class SmoothingLDS(InferenceNetwork):
         feed_dict = {self.input_ph: observations}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)
-
-
-class SmoothingLDSCoupled(SmoothingLDS):
-    """
-    Approximate posterior is modeled as a Gaussian distribution with a
-    structure mirroring that from a linear dynamical system; parameters are
-    coupled to parameters of the LDSCoupled GenerativeModel class through the
-    use of the LDSCoupledModel Model class
-    """
-
-    def __init__(
-            self, dim_input=None, dim_latent=None, num_mc_samples=1,
-            num_time_pts=None):
-
-        super(SmoothingLDSCoupled, self).__init__(
-            dim_input=dim_input, dim_latent=dim_latent,
-            num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
-
-    def build_graph(self, z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv):
-        """Build tensorflow computation graph for inference network"""
-
-        # make variables shared with generative model attributes
-        self.z0_mean = z0_mean
-        self.A = A
-        self.Q0_sqrt = Q0_sqrt
-        self.Q_sqrt = Q_sqrt
-        self.Q0 = Q0
-        self.Q = Q
-        self.Q0_inv = Q0_inv
-        self.Q_inv = Q_inv
-
-        # construct data pipeline
-        with tf.variable_scope('inference_input'):
-            self._initialize_inference_input()
-
-        with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp()
-
-        with tf.variable_scope('precision_matrix'):
-            self._build_precision_matrix()
-
-        with tf.variable_scope('posterior_mean'):
-            self._build_posterior_mean()
-
-        with tf.variable_scope('posterior_samples'):
-            self._build_posterior_samples()
 
 
 class MeanFieldGaussian(InferenceNetwork):

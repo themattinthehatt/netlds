@@ -447,119 +447,39 @@ class DynamicalModel(Model):
         return cost
 
 
-class LDSCoupledModel(DynamicalModel):
-    """LDS generative model, LDS approximate posterior, shared parameters"""
-
-    _allowed_inf_networks = ['SmoothingLDSCoupled']
-    _allowed_gen_models = [
-        'LDSCoupled', 'FLDSCoupled', 'NetLDSCoupled', 'NetFLDSCoupled']
-
-    def __init__(
-            self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, np_seed=0, tf_seed=0):
-        """
-        Constructor for full Model; see DynamicalModel for full arg
-        documentation
-
-        Args:
-            inf_network (InferenceNetwork class):
-                SmoothingLDSCoupled
-            gen_model (GenerativeModel class)
-                LDSCoupled | PLDSCoupled | FLDSCoupled | PFLDSCoupled
-
-        """
-
-        if inf_network.__name__ not in self._allowed_inf_networks:
-            raise ValueError('%s is not a valid inference network for the '
-                             'LDSCoupledModel class; must use '
-                             'SmoothingLDSCoupled inference network instead.'
-                             % inf_network.__name__)
-        if gen_model.__name__ not in self._allowed_gen_models:
-            raise ValueError('%s is not a valid generative model for the '
-                             'LDSCoupledModel class; must use '
-                             '*LDSCoupled generative model instead.'
-                             % gen_model.__name__)
-
-        super(LDSCoupledModel, self).__init__(
-            inf_network=inf_network, inf_network_params=inf_network_params,
-            gen_model=gen_model, gen_model_params=gen_model_params,
-            np_seed=np_seed, tf_seed=tf_seed)
-
-        self.constructor_inputs['model_class'] = LDSCoupledModel
-
-    def build_graph(self):
-        """Build tensorflow computation graph for model"""
-
-        self.graph = tf.Graph()  # must be initialized before graph creation
-
-        # build model graph
-        with self.graph.as_default():
-
-            # set random seed for this graph
-            tf.set_random_seed(self.tf_seed)
-
-            with tf.variable_scope('shared_vars'):
-                z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv = \
-                    self.gen_net.initialize_prior_vars()
-
-            with tf.variable_scope('inference_network'):
-                self.inf_net.build_graph(
-                    z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv)
-
-            with tf.variable_scope('generative_model'):
-                self.gen_net.build_graph(
-                    self.inf_net.post_z_samples,
-                    z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv)
-
-            with tf.variable_scope('objective'):
-                self._define_objective()
-
-            with tf.variable_scope('optimizer'):
-                self.trainer._define_optimizer_op(self)
-
-            # add additional ops
-            # for saving and restoring models (initialized after var creation)
-            self.saver = tf.train.Saver()
-            # collect all summaries into a single op
-            self.merge_summaries = tf.summary.merge_all()
-            # add variable initialization op to graph
-            self.init = tf.global_variables_initializer()
-
-
 class LDSModel(DynamicalModel):
     """LDS generative model, various options for approximate posterior"""
 
-    _allowed_inf_networks = [
-        'MeanFieldGaussian', 'MeanFieldGaussianTemporal', 'SmoothingLDS']
-    _allowed_gen_models = ['LDS', 'FLDS', 'NetLDS', 'NetFLDS']
-
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
-            gen_model_params=None, np_seed=0, tf_seed=0):
+            gen_model_params=None, couple_params=True, np_seed=0, tf_seed=0):
         """
         Constructor for full Model; see DynamicalModel for arg documentation
 
         Args:
             inf_network (InferenceNetwork class):
                 MeanFieldGaussian | MeanFieldGaussianTemporal | SmoothingLDS
+            inf_network_params (dict): see constructors in inference.py
             gen_model (GenerativeModel class)
-                LDS | PLDS | FLDS | PFLDS
+                NetFLDS | NetLDS | FLDS | LDS
+            gen_model_params (dict): see constructors in generative.py
+            couple_params (bool): couple dynamical parameters of generative
+                model and approximate posterior; only used when
+                inf_network=SmoothingLDS and gen_model=*LDS
+            np_seed (int): for training minibatches
+            tf_seed (int): for initializing tf.Variables (sampling functions
+                have their own seed arguments)
 
         """
-
-        if inf_network.__name__ not in self._allowed_inf_networks:
-            raise ValueError('%s is not a valid inference network for the '
-                             'LDSModel class.' % inf_network.__name__)
-        if gen_model.__name__ not in self._allowed_gen_models:
-            raise ValueError('%s is not a valid generative model for the '
-                             'LDSCoupledModel class' % gen_model.__name__)
 
         super(LDSModel, self).__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
             np_seed=np_seed, tf_seed=tf_seed)
+        self.couple_params = couple_params
 
         self.constructor_inputs['model_class'] = LDSModel
+        self.constructor_inputs['couple_params'] = couple_params
 
     def build_graph(self, opt_params=None):
         """Build tensorflow computation graph for model"""
@@ -572,11 +492,30 @@ class LDSModel(DynamicalModel):
             # set random seed for this graph
             tf.set_random_seed(self.tf_seed)
 
-            with tf.variable_scope('inference_network'):
-                self.inf_net.build_graph()
+            if self.couple_params:
 
-            with tf.variable_scope('generative_model'):
-                self.gen_net.build_graph(self.inf_net.post_z_samples)
+                with tf.variable_scope('shared_vars'):
+                    param_dict = self.gen_net.initialize_prior_vars()
+
+                with tf.variable_scope('inference_network'):
+                    self.inf_net.build_graph(param_dict)
+
+                with tf.variable_scope('generative_model'):
+                    self.gen_net.build_graph(
+                        self.inf_net.post_z_samples, param_dict)
+
+            else:
+
+                with tf.variable_scope('inference_network'):
+                    with tf.variable_scope('model_params'):
+                        param_dict = self.gen_net.initialize_prior_vars()
+                    self.inf_net.build_graph(param_dict)
+
+                with tf.variable_scope('generative_model'):
+                    with tf.variable_scope('model_params'):
+                        param_dict = self.gen_net.initialize_prior_vars()
+                    self.gen_net.build_graph(
+                        self.inf_net.post_z_samples, param_dict)
 
             with tf.variable_scope('objective'):
                 self._define_objective()
