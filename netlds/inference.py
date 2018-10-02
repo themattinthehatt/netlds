@@ -61,6 +61,46 @@ class SmoothingLDS(InferenceNetwork):
         self.num_time_pts = num_time_pts
         self.nn_params = nn_params
 
+        # initialize networks
+
+        # default inference network
+        if self.nn_params is None:
+            layer_params = {
+                'units': 30,
+                'activation': 'tanh',
+                'kernel_initializer': 'trunc_normal',
+                'kernel_regularizer': None,
+                'bias_initializer': 'zeros',
+                'bias_regularizer': None}
+            self.nn_params = [layer_params, layer_params]
+        self.network = Network(
+            output_dim=30, nn_params=self.nn_params)
+
+        # inference network -> means
+        layer_z_mean_params = [{
+            'units': self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_means'}]
+        self.layer_z_mean = Network(
+            output_dim=self.dim_latent, nn_params=layer_z_mean_params)
+
+        # inference network -> stddevs
+        layer_z_var_params = [{
+            'units': self.dim_latent * self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_stddev'}]
+        self.layer_z_vars = Network(
+            output_dim=self.dim_latent * self.dim_latent,
+            nn_params=layer_z_var_params)
+
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
 
@@ -152,8 +192,8 @@ class SmoothingLDS(InferenceNetwork):
             self.Q0_sqrt, self.Q0_sqrt, transpose_b=True, name='Q0')
         self.Q = tf.matmul(
             self.Q_sqrt, self.Q_sqrt, transpose_b=True, name='Q')
-        self.Q0inv = tf.matrix_inverse(self.Q0, name='Q0inv')
-        self.Qinv = tf.matrix_inverse(self.Q, name='Qinv')
+        self.Q0_inv = tf.matrix_inverse(self.Q0, name='Q0_inv')
+        self.Q_inv = tf.matrix_inverse(self.Q, name='Q_inv')
 
     def _initialize_inference_input(self):
 
@@ -168,44 +208,8 @@ class SmoothingLDS(InferenceNetwork):
 
     def _build_inference_mlp(self):
 
-        # default network
-        if self.nn_params is None:
-            layer_params = {
-                'units': 30,
-                'activation': 'tanh',
-                'kernel_initializer': 'trunc_normal',
-                'kernel_regularizer': None,
-                'bias_initializer': 'zeros',
-                'bias_regularizer': None}
-            self.nn_params = [layer_params, layer_params]
-
-        self.network = Network(
-            output_dim=30, nn_params=self.nn_params)
         self.network.build_graph()
-
-        layer_z_mean_params = [{
-            'units': self.dim_latent,
-            'activation': 'identity',
-            'kernel_initializer': 'trunc_normal',
-            'kernel_regularizer': None,
-            'bias_initializer': 'zeros',
-            'bias_regularizer': None,
-            'name': 'z_means'}]
-        self.layer_z_mean = Network(
-            output_dim=self.dim_latent, nn_params=layer_z_mean_params)
         self.layer_z_mean.build_graph()
-
-        layer_z_var_params = [{
-            'units': self.dim_latent * self.dim_latent,
-            'activation': 'identity',
-            'kernel_initializer': 'trunc_normal',
-            'kernel_regularizer': None,
-            'bias_initializer': 'zeros',
-            'bias_regularizer': None,
-            'name': 'z_stddev'}]
-        self.layer_z_vars = Network(
-            output_dim=self.dim_latent * self.dim_latent,
-            nn_params=layer_z_var_params)
         self.layer_z_vars.build_graph()
 
         # compute layer outputs from inference network input
@@ -227,31 +231,31 @@ class SmoothingLDS(InferenceNetwork):
             tf.transpose(self.r_psi_sqrt, perm=[0, 1, 3, 2]),
             name='precision_diag_data_dep')
 
-        self.AQ0invA_Qinv = tf.matmul(
-            tf.matmul(self.A, self.Q0inv), self.A, transpose_b=True) \
-                            + self.Qinv
-        self.AQinvA_Qinv = tf.matmul(
-            tf.matmul(self.A, self.Qinv), self.A, transpose_b=True) + self.Qinv
-        self.AQ0inv = tf.matmul(-self.A, self.Q0inv)
-        self.AQinv = tf.matmul(-self.A, self.Qinv)
+        self.AQ0_invA_Q_inv = tf.matmul(
+            tf.matmul(self.A, self.Q0_inv), self.A, transpose_b=True) \
+                            + self.Q_inv
+        self.AQ_invA_Q_inv = tf.matmul(
+            tf.matmul(self.A, self.Q_inv), self.A, transpose_b=True) + self.Q_inv
+        self.AQ0_inv = tf.matmul(-self.A, self.Q0_inv)
+        self.AQ_inv = tf.matmul(-self.A, self.Q_inv)
 
         # put together components of precision matrix Sinv in tensor of
         # shape [batch_size, num_time_pts, dim_latent, dim_latent]
         Sinv_diag = tf.tile(
-            tf.expand_dims(self.AQinvA_Qinv, 0),
+            tf.expand_dims(self.AQ_invA_Q_inv, 0),
             [self.num_time_pts - 2, 1, 1])
         Sinv_diag = tf.concat(
-            [tf.expand_dims(self.Q0inv, 0),
-             tf.expand_dims(self.AQ0invA_Qinv, 0),
+            [tf.expand_dims(self.Q0_inv, 0),
+             tf.expand_dims(self.AQ0_invA_Q_inv, 0),
              Sinv_diag], axis=0, name='precision_diag_static')
         self.Sinv_diag = tf.add(Sinv_diag, self.c_psi_inv,
                                 name='precision_diag')
 
         Sinv_ldiag = tf.tile(
-            tf.expand_dims(self.AQinv, 0),
+            tf.expand_dims(self.AQ_inv, 0),
             [self.num_time_pts - 2, 1, 1], name='precision_lower_diag')
         Sinv_ldiag0 = tf.concat(
-            [tf.expand_dims(self.AQ0inv, 0), Sinv_ldiag], axis=0)
+            [tf.expand_dims(self.AQ0_inv, 0), Sinv_ldiag], axis=0)
 
         # we now have Sinv (represented as diagonal and off-diagonal
         # blocks); to sample from the posterior we need the square root
@@ -408,7 +412,7 @@ class SmoothingLDSCoupled(SmoothingLDS):
             dim_input=dim_input, dim_latent=dim_latent,
             num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
 
-    def build_graph(self, z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv):
+    def build_graph(self, z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv):
         """Build tensorflow computation graph for inference network"""
 
         # make variables shared with generative model attributes
@@ -418,8 +422,8 @@ class SmoothingLDSCoupled(SmoothingLDS):
         self.Q_sqrt = Q_sqrt
         self.Q0 = Q0
         self.Q = Q
-        self.Q0inv = Q0inv
-        self.Qinv = Qinv
+        self.Q0_inv = Q0_inv
+        self.Q_inv = Q_inv
 
         # construct data pipeline
         with tf.variable_scope('inference_input'):

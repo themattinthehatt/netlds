@@ -429,13 +429,13 @@ class Trainer(object):
 
         if batch_indxs is not None:
             feed_dict = {
-                model.gen_net.obs_ph:
+                model.gen_net.outputs_ph:
                     observations[batch_indxs, :, :],
                 model.inf_net.input_ph:
                     observations[batch_indxs, :, :]}
         else:
             feed_dict = {
-                model.gen_net.obs_ph: observations,
+                model.gen_net.outputs_ph: observations,
                 model.inf_net.input_ph: observations}
 
         return feed_dict

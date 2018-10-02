@@ -452,7 +452,7 @@ class LDSCoupledModel(DynamicalModel):
 
     _allowed_inf_networks = ['SmoothingLDSCoupled']
     _allowed_gen_models = [
-        'LDSCoupled', 'FLDSCoupled']
+        'LDSCoupled', 'FLDSCoupled', 'NetLDSCoupled', 'NetFLDSCoupled']
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
@@ -499,17 +499,17 @@ class LDSCoupledModel(DynamicalModel):
             tf.set_random_seed(self.tf_seed)
 
             with tf.variable_scope('shared_vars'):
-                z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv = \
+                z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv = \
                     self.gen_net.initialize_prior_vars()
 
             with tf.variable_scope('inference_network'):
                 self.inf_net.build_graph(
-                    z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv)
+                    z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv)
 
             with tf.variable_scope('generative_model'):
                 self.gen_net.build_graph(
                     self.inf_net.post_z_samples,
-                    z0_mean, A, Q_sqrt, Q, Qinv, Q0_sqrt, Q0, Q0inv)
+                    z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv)
 
             with tf.variable_scope('objective'):
                 self._define_objective()
@@ -531,7 +531,7 @@ class LDSModel(DynamicalModel):
 
     _allowed_inf_networks = [
         'MeanFieldGaussian', 'MeanFieldGaussianTemporal', 'SmoothingLDS']
-    _allowed_gen_models = ['LDS', 'FLDS']
+    _allowed_gen_models = ['LDS', 'FLDS', 'NetLDS', 'NetFLDS']
 
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,

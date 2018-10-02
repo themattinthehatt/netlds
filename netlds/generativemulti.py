@@ -1,53 +1,16 @@
-"""GenerativeModel class for ... generative models"""
+"""Generative model classes for multiple interacting populations"""
 
 import numpy as np
 import tensorflow as tf
 from netlds.network import Network
+from netlds.generative import GenerativeModel, FLDS
 
 
-class GenerativeModel(object):
-    """Base class for generative models"""
-
-    # use same data type throughout graph construction
-    dtype = tf.float32
-
-    def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            **kwargs):
-        """
-        Set base class attributes
-
-        Args:
-            dim_obs (int): dimension of observation vector
-            dim_latent (int): dimension of latent state
-            post_z_samples (batch_size x num_mc_samples x num_time_pts x
-                dim_latent tf.Tensor): samples from the (appx) posterior of the
-                latent states
-
-        """
-
-        # set basic dims
-        self.dim_latent = dim_latent
-        self.dim_obs = dim_obs
-        # tf.Tensor that contains samples from the approximate posterior
-        # (output of inference network)
-        self.post_z_samples = post_z_samples
-
-    def build_graph(self, *args, **kwargs):
-        """Build tensorflow computation graph for generative model"""
-        raise NotImplementedError
-
-    def log_density(self, y, z):
-        """Evaluate log density of generative model"""
-        raise NotImplementedError
-
-    def sample(self, sess, num_samples=1, seed=None):
-        """Draw samples from model"""
-        raise NotImplementedError
-
-
-class FLDS(GenerativeModel):
-    """Linear dynamical system model with Gaussian observations"""
+class NetFLDS(FLDS):
+    """
+    Linear dynamical system model underlying multiple populations with
+    Gaussian observations
+    """
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
@@ -55,21 +18,30 @@ class FLDS(GenerativeModel):
             noise_dist='gaussian'):
         """
         Generative model is defined as
-            z_t = A z_{t-1} + \eps
-            y_t = C z_t + d + \eta
+            z_t ~ N(A z_{t-1}, Q)
+            E[y_t] = f(z_t)
 
         Args:
+            dim_obs (list): observation dimension for each population
+            dim_latent (list): latent dimension for each population
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
                 model
+            nn_params (list): dictionaries for building each layer of the
+                mapping from the latent space to observations; the same
+                network architecture is used for each population
             noise_dist (str): 'gaussian' | 'poisson'
 
         """
 
-        super().__init__(
-            dim_obs=dim_obs, dim_latent=dim_latent,
-            post_z_samples=post_z_samples)
+        GenerativeModel.__init__(self, post_z_samples=post_z_samples)
+        self.dim_obs = dim_obs
+        self.dim_latent = dim_latent
+
         self.num_time_pts = num_time_pts
         if gen_params is None:
             self.gen_params = {}
@@ -90,11 +62,22 @@ class FLDS(GenerativeModel):
             nn_params = [{}]
         nn_params[-1]['activation'] = activation
 
-        # build network
-        self.network = Network(output_dim=dim_obs, nn_params=nn_params)
-
+        # build networks
+        self.networks = []
+        for _, pop_dim in enumerate(dim_obs):
+            self.networks.append(
+                Network(output_dim=pop_dim, nn_params=nn_params))
+            
         # initialize lists for other relevant variables
-        self.outputs_ph = []
+        self.outputs = []
+        self.y_pred = []
+        self.y_samples_prior = []
+        self.obs_indxs = []
+        self.latent_indxs = []
+        if noise_dist is 'gaussian':
+            self.R_sqrt = []
+            self.R = []
+            self.R_inv = []
 
     def build_graph(self, *args, **kwargs):
         """
@@ -108,21 +91,42 @@ class FLDS(GenerativeModel):
 
         z_samples = args[0]
 
-        # construct data pipeline
+        # construct data pipeline - assume that all data comes in as a large
+        # block, and slice up tensor here to correspond to data from distinct
+        # populations
+        # NOTE: requires that `dim_obs` input to constructor is in same order
+        # as the data
         with tf.variable_scope('observations'):
             self.outputs_ph = tf.placeholder(
                 dtype=self.dtype,
                 shape=[None, self.num_time_pts, self.dim_obs],
                 name='outputs_ph')
+            indx_start = 0
+            for pop, pop_dim in enumerate(self.dim_obs):
+                indx_end = indx_start + pop_dim
+                self.obs_indxs.append(
+                    np.arange(indx_start, indx_end + 1, dtype=np.int32))
+                self.outputs.append(
+                    self.outputs_ph[:, :, indx_start:indx_end])
+                indx_start = indx_end
 
         with tf.variable_scope('model_params'):
             self.initialize_prior_vars()
 
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
-            self.network.build_graph()
-            self.y_pred = self.network.apply_network(z_samples)
-            self._initialize_noise_dist_vars()
+            # keep track of which latent states belong to each population
+            indx_start = 0
+            for pop, pop_dim_latent in enumerate(self.dim_latent):
+                with tf.variable_scope(str('population_%02i' % pop)):
+                    self.networks[pop].build_graph()
+                    indx_end = indx_start + pop_dim_latent
+                    self.latent_indxs.append(
+                        np.arange(indx_start, indx_end + 1, dtype=np.int32))
+                    self.y_pred.append(self.networks[pop].apply_network(
+                        z_samples[:, :, :, indx_start:indx_end]))
+                    indx_start = indx_end
+                    self._initialize_noise_dist_vars(pop)
 
         # define branch of graph for evaluating prior model
         with tf.variable_scope('generative_samples'):
@@ -157,7 +161,7 @@ class FLDS(GenerativeModel):
         else:
             self.A = tf.get_variable(
                 'A',
-                initializer=0.5 * np.eye(self.dim_latent,
+                initializer=0.5 * np.eye(sum(self.dim_latent),
                                          dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
@@ -171,7 +175,7 @@ class FLDS(GenerativeModel):
             self.Q_sqrt = tf.get_variable(
                 'Q_sqrt',
                 initializer=0.1 * np.eye(
-                    self.dim_latent,
+                    sum(self.dim_latent),
                     dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
@@ -185,11 +189,11 @@ class FLDS(GenerativeModel):
             self.Q0_sqrt = tf.get_variable(
                 'Q0_sqrt',
                 initializer=0.1 * np.eye(
-                    self.dim_latent,
+                    sum(self.dim_latent),
                     dtype=self.dtype.as_numpy_dtype),
                 dtype=self.dtype)
 
-        diag = 1e-6 * np.eye(self.dim_latent,
+        diag = 1e-6 * np.eye(sum(self.dim_latent),
                              dtype=self.dtype.as_numpy_dtype)
 
         self.Q0 = tf.matmul(
@@ -200,7 +204,7 @@ class FLDS(GenerativeModel):
         self.Q0_inv = tf.matrix_inverse(self.Q0, name='Q0_inv')
         self.Q_inv = tf.matrix_inverse(self.Q, name='Q_inv')
 
-    def _initialize_noise_dist_vars(self, *args):
+    def _initialize_noise_dist_vars(self, pop):
 
         if self.noise_dist is 'gaussian':
             tr_norm_initializer = tf.initializers.truncated_normal(
@@ -210,19 +214,19 @@ class FLDS(GenerativeModel):
             # square root of diagonal of observation covariance matrix
             # (assume diagonal)
             if 'R_sqrt' in self.gen_params:
-                self.R_sqrt = tf.get_variable(
+                self.R_sqrt.append(tf.get_variable(
                     'R_sqrt',
-                    initializer=self.gen_params['R_sqrt'],
-                    dtype=self.dtype)
+                    initializer=self.gen_params['R_sqrt'][pop],
+                    dtype=self.dtype))
             else:
-                self.R_sqrt = tf.get_variable(
+                self.R_sqrt.append(tf.get_variable(
                     'R_sqrt',
-                    shape=[1, self.dim_obs],
+                    shape=[1, self.dim_obs[pop]],
                     initializer=tr_norm_initializer,
-                    dtype=self.dtype)
-            self.R = tf.square(self.R_sqrt)
-            self.R_inv = 1.0 / self.R
-
+                    dtype=self.dtype))
+            self.R.append(tf.square(self.R_sqrt[pop]))
+            self.R_inv.append(1.0 / self.R[pop])
+            
     def _sample_yz(self):
         """
         Define branch of tensorflow computation graph for sampling from the
@@ -233,7 +237,9 @@ class FLDS(GenerativeModel):
             dtype=tf.int32, shape=None, name='num_samples_ph')
 
         self.latent_rand_samples = tf.random_normal(
-            shape=[self.num_samples_ph, self.num_time_pts, self.dim_latent],
+            shape=[self.num_samples_ph,
+                   self.num_time_pts,
+                   sum(self.dim_latent)],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='latent_rand_samples')
 
         # get random samples from latent space
@@ -268,88 +274,74 @@ class FLDS(GenerativeModel):
         # expand dims to account for time and mc dims when applying mapping
         # now (1 x num_samples x num_time_pts x dim_latent)
         z_samples_ex = tf.expand_dims(self.z_samples_prior, axis=0)
-        y_means = tf.squeeze(self.network.apply_network(z_samples_ex),
-                             axis=0)
+
+        y_means = []
+        for pop, pop_dim in enumerate(self.dim_obs):
+            y_means.append(tf.squeeze(self.networks[pop].apply_network(
+                z_samples_ex[:, :, :,
+                             self.latent_indxs[pop][0]:
+                             self.latent_indxs[pop][-1]]),
+                axis=0))
 
         # get random samples from observation space
         if self.noise_dist is 'gaussian':
-            self.obs_rand_samples = tf.random_normal(
-                shape=[self.num_samples_ph, self.num_time_pts, self.dim_obs],
-                mean=0.0, stddev=1.0, dtype=self.dtype,
-                name='obs_rand_samples')
-            self.y_samples_prior = y_means + tf.multiply(self.obs_rand_samples,
-                                                         self.R_sqrt)
+            obs_rand_samples = []
+            for pop, pop_dim in enumerate(self.dim_obs):
+                obs_rand_samples.append(tf.random_normal(
+                    shape=[self.num_samples_ph, self.num_time_pts, pop_dim],
+                    mean=0.0, stddev=1.0, dtype=self.dtype,
+                    name=str('obs_rand_samples_%02i' % pop)))
+                self.y_samples_prior.append(y_means[pop] + tf.multiply(
+                    obs_rand_samples[pop], self.R_sqrt[pop]))
 
         elif self.noise_dist is 'poisson':
-            self.y_samples_prior = tf.squeeze(tf.random_poisson(
-                lam=y_means, shape=[1], dtype=self.dtype), axis=0)
-
-    def log_density(self, y, z):
-        """
-        Evaluate log density for generative model, defined as
-        p(y, z) = p(y | z) p(z)
-        where
-        p(z) = \prod_t p(z_t), z_t ~ N(A z_{t-1}, Q)
-        p(y | z) = \prod_t p(y_t | z_t)
-
-        Args:
-            y (batch_size x num_mc_samples x num_time_pts x dim_obs tf.Tensor)
-            z (batch_size x num_mc_samples x num_time_pts x dim_latent
-                tf.Tensor)
-
-        Returns:
-            float: log density over y and z, averaged over minibatch samples
-                and monte carlo samples
-
-        """
-
-        # likelihood
-        with tf.variable_scope('likelihood'):
-            self.log_density_y = self._log_density_likelihood(y)
-
-        # prior
-        with tf.variable_scope('prior'):
-            self.log_density_z = self._log_density_prior(z)
-
-        return self.log_density_y + self.log_density_z
+            for pop, pop_dim in enumerate(self.dim_obs):
+                self.y_samples_prior.append(tf.squeeze(tf.random_poisson(
+                    lam=y_means[pop], shape=[1], dtype=self.dtype), axis=0))
 
     def _log_density_likelihood(self, y):
 
+        log_density_y = []
         if self.noise_dist is 'gaussian':
-            # expand observation dims over mc samples
-            res_y = tf.expand_dims(self.outputs_ph[0], axis=1) - y
+            for pop, pop_dim in enumerate(self.dim_obs):
+                # expand observation dims over mc samples
+                res_y = tf.expand_dims(self.outputs[pop], axis=1) - y[pop]
 
-            # average over batch and mc sample dimensions
-            res_y_R_inv_res_y = tf.reduce_mean(
-                tf.multiply(tf.square(res_y), self.R_inv), axis=[0, 1])
+                # average over batch and mc sample dimensions
+                res_y_R_inv_res_y = tf.reduce_mean(
+                    tf.multiply(tf.square(res_y), self.R_inv[pop]),
+                    axis=[0, 1])
 
-            # sum over time and observation dimensions
-            test_like = tf.reduce_sum(res_y_R_inv_res_y)
-            tf.summary.scalar('log_joint_like', -0.5 * test_like)
+                # sum over time and observation dimensions
+                test_like = tf.reduce_sum(res_y_R_inv_res_y)
+                tf.summary.scalar(str('log_joint_like_%02i' % pop),
+                                  -0.5 * test_like)
 
-            # total term for likelihood
-            log_density_y = -0.5 * (test_like
-                 + self.num_time_pts * tf.reduce_sum(tf.log(self.R))
-                 + self.num_time_pts * self.dim_obs * tf.log(2.0 * np.pi))
+                # total term for likelihood
+                log_density_y.append(-0.5 * (test_like
+                     + self.num_time_pts * tf.reduce_sum(tf.log(self.R[pop]))
+                     + self.num_time_pts * pop_dim * tf.log(2.0 * np.pi)))
 
         elif self.noise_dist is 'poisson':
+            for pop, pop_dim in enumerate(self.dim_obs):
+                # expand observation dims over mc samples
+                obs_y = tf.expand_dims(self.outputs[pop], axis=1)
 
-            # expand observation dims over mc samples
-            obs_y = tf.expand_dims(self.outputs_ph[0], axis=1)
+                # average over batch and mc sample dimensions
+                log_density_ya = tf.reduce_mean(
+                    tf.multiply(obs_y[pop], tf.log(y[pop])) - y[pop]
+                    - tf.lgamma(1 + obs_y[pop]),
+                    axis=[0, 1])
 
-            # average over batch and mc sample dimensions
-            log_density_ya = tf.reduce_mean(
-                tf.multiply(obs_y, tf.log(y)) - y - tf.lgamma(1 + obs_y),
-                axis=[0, 1])
-
-            # sum over time and observation dimensions
-            log_density_y = tf.reduce_sum(log_density_ya)
-            tf.summary.scalar('log_joint_like', log_density_y)
+                # sum over time and observation dimensions
+                log_density_y.append(tf.reduce_sum(log_density_ya))
+                tf.summary.scalar(str('log_joint_like_%02i' % pop),
+                                  log_density_y)
 
         else:
             raise ValueError
 
-        return log_density_y
+        return tf.add_n(log_density_y, name='log_joint_like_total')
 
     def _log_density_prior(self, z):
         res_z0 = z[:, :, 0, :] - self.z0_mean
@@ -374,61 +366,42 @@ class FLDS(GenerativeModel):
         log_density_z = -0.5 * (test_prior + test_prior0
              + (self.num_time_pts - 1) * tf.log(tf.matrix_determinant(self.Q))
              + tf.log(tf.matrix_determinant(self.Q0))
-             + self.num_time_pts * self.dim_latent * tf.log(2.0 * np.pi))
+             + self.num_time_pts * sum(self.dim_latent) * tf.log(2.0 * np.pi))
 
         return log_density_z
-
-    def sample(self, sess, num_samples=1, seed=None):
-        """
-        Generate samples from the model
-
-        Args:
-            sess (tf.Session object)
-            num_samples (int, optional)
-            seed (int, optional)
-
-        Returns:
-            num_time_pts x dim_obs x num_samples numpy array:
-                sample observations y
-            num_time_pts x dim_latent x num_samples numpy array:
-                sample latent states z
-
-        """
-
-        if seed is not None:
-            tf.set_random_seed(seed)
-
-        [y, z] = sess.run(
-            [self.y_samples_prior, self.z_samples_prior],
-            feed_dict={self.num_samples_ph: num_samples})
-
-        return y, z
 
     def get_params(self, sess):
         """Get parameters of generative model"""
 
         if self.noise_dist is 'gaussian':
-            A, layer_weights, R_sqrt, z0_mean, Q, Q0 = sess.run(
+            A, R_sqrt, z0_mean, Q, Q0 = sess.run(
                 [self.A, self.network.layers[0].weights, self.R_sqrt,
                  self.z0_mean, self.Q, self.Q0])
 
             param_dict = {
-                'A': A, 'C': layer_weights[0], 'd': layer_weights[1],
-                'R': np.square(R_sqrt), 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+                'A': A, 'R': np.square(R_sqrt), 'z0_mean': z0_mean,
+                'Q': Q, 'Q0': Q0}
+
         elif self.noise_dist is 'poisson':
-            A, C, d, z0_mean, Q, Q0 = sess.run(
-                [self.A, self.network.layers[0].weights, self.z0_mean, self.Q,
-                 self.Q0])
+            A, z0_mean, Q, Q0 = sess.run(
+                [self.A, self.z0_mean, self.Q, self.Q0])
 
             param_dict = {
-                'A': A, 'C': C, 'd': d, 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
+                'A': A, 'z0_mean': z0_mean, 'Q': Q, 'Q0': Q0}
         else:
             raise ValueError
+
+        param_dict['C'] = []
+        param_dict['d'] = []
+        for pop, pop_dim in enumerate(self.dim_obs):
+            layer_weights = sess.run(self.networks[pop].layers[0].weights)
+            param_dict['C'].append(layer_weights[0])
+            param_dict['d'].append(layer_weights[1])
 
         return param_dict
 
 
-class FLDSCoupled(FLDS):
+class NetFLDSCoupled(NetFLDS):
     """
     Linear dynamical system model with Gaussian observations; model parameters
     are coupled to parameters of approximate posterior SmoothingLDSCoupled
@@ -458,7 +431,8 @@ class FLDSCoupled(FLDS):
             nn_params=nn_params, noise_dist=noise_dist)
 
     def build_graph(
-            self, z_samples, z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv):
+            self, z_samples, z0_mean, A,
+            Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv):
         """
         Build tensorflow computation graph for generative model
 
@@ -476,13 +450,6 @@ class FLDSCoupled(FLDS):
 
         """
 
-        # construct data pipeline
-        with tf.variable_scope('observations'):
-            self.outputs_ph = tf.placeholder(
-                dtype=self.dtype,
-                shape=[None, self.num_time_pts, self.dim_obs],
-                name='outputs_ph')
-
         # make variables shared with inference model attributes
         self.z0_mean = z0_mean
         self.A = A
@@ -493,11 +460,41 @@ class FLDSCoupled(FLDS):
         self.Q0_inv = Q0_inv
         self.Q_inv = Q_inv
 
+        # construct data pipeline - assume that all data comes in as a large
+        # block, and slice up tensor here to correspond to data from distinct
+        # populations
+        # NOTE: requires that `dim_obs` input to constructor is in same order
+        # as the data
+        with tf.variable_scope('observations'):
+            self.outputs_ph = tf.placeholder(
+                dtype=self.dtype,
+                shape=[None, self.num_time_pts, sum(self.dim_obs)],
+                name='outputs_ph')
+            indx_start = 0
+            for pop, pop_dim in enumerate(self.dim_obs):
+                indx_end = indx_start + pop_dim
+                self.obs_indxs.append(np.arange(
+                    indx_start, indx_end + 1, dtype=np.int32))
+                self.outputs.append(self.outputs_ph[:, :, indx_start:indx_end])
+                indx_start = indx_end
+
+        with tf.variable_scope('model_params'):
+            self.initialize_prior_vars()
+
         # initialize mapping from latent space to observations
         with tf.variable_scope('mapping'):
-            self.network.build_graph()
-            self.y_pred = self.network.apply_network(z_samples)
-            self._initialize_noise_dist_vars()
+            # keep track of which latent states belong to each population
+            indx_start = 0
+            for pop, pop_dim_latent in enumerate(self.dim_latent):
+                with tf.variable_scope(str('population_%02i' % pop)):
+                    self.networks[pop].build_graph()
+                    indx_end = indx_start + pop_dim_latent
+                    self.latent_indxs.append(np.arange(
+                        indx_start, indx_end + 1, dtype=np.int32))
+                    self.y_pred.append(self.networks[pop].apply_network(
+                        z_samples[:, :, :, indx_start:indx_end]))
+                    indx_start = indx_end
+                    self._initialize_noise_dist_vars(pop)
 
         # define branch of graph for evaluating prior model
         with tf.variable_scope('generative_samples'):
@@ -519,7 +516,7 @@ class FLDSCoupled(FLDS):
         else:
             z0_mean = tf.get_variable(
                 'z0_mean',
-                shape=[1, self.dim_latent],
+                shape=[1, sum(self.dim_latent)],
                 initializer=zeros_initializer,
                 dtype=self.dtype)
 
@@ -532,7 +529,7 @@ class FLDSCoupled(FLDS):
         else:
             A = tf.get_variable(
                 'A',
-                initializer=0.5 * np.eye(self.dim_latent,
+                initializer=0.5 * np.eye(sum(self.dim_latent),
                                          dtype=self.dtype.as_numpy_dtype()),
                 dtype=self.dtype)
 
@@ -546,7 +543,7 @@ class FLDSCoupled(FLDS):
             Q_sqrt = tf.get_variable(
                 'Q_sqrt',
                 initializer=np.eye(
-                    self.dim_latent,
+                    sum(self.dim_latent),
                     dtype=self.dtype.as_numpy_dtype()),
                 dtype=self.dtype)
 
@@ -560,7 +557,7 @@ class FLDSCoupled(FLDS):
             Q0_sqrt = tf.get_variable(
                 'Q0_sqrt',
                 initializer=np.eye(
-                    self.dim_latent,
+                    sum(self.dim_latent),
                     dtype=self.dtype.as_numpy_dtype()),
                 dtype=self.dtype)
 
@@ -572,7 +569,7 @@ class FLDSCoupled(FLDS):
         return z0_mean, A, Q_sqrt, Q, Q_inv, Q0_sqrt, Q0, Q0_inv
 
 
-class LDS(FLDS):
+class NetLDS(NetFLDS):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
@@ -581,28 +578,33 @@ class LDS(FLDS):
         if gen_params is None:
             gen_params = {}
 
-        # emissions matrix
-        if 'C' in gen_params:
-            kernel_initializer = tf.constant_initializer(
-                gen_params['C'], dtype=self.dtype)
-        else:
-            kernel_initializer = 'trunc_normal'
+        # iterate through populations
+        # NOTE: must set kernel/bias initializers outside of this constructor
+        # for now since NetFLDS assumes nn_params is the same for each pop
+        for pop, _ in enumerate(dim_obs):
 
-        # biases
-        if 'd' in gen_params:
-            bias_initializer = tf.constant_initializer(
-                gen_params['d'], dtype=self.dtype)
-        else:
-            bias_initializer = 'zeros'
+            # emissions matrix
+            if 'C' in gen_params:
+                kernel_initializer = tf.constant_initializer(
+                    gen_params['C'][pop], dtype=self.dtype)
+            else:
+                kernel_initializer = 'trunc_normal'
 
-        # list of dicts specifying (linear) nn to observations
-        nn_params = [{
-            'units': dim_obs,
-            'activation': 'linear',
-            'kernel_initializer': kernel_initializer,
-            'bias_initializer': bias_initializer,
-            'kernel_regularizer': None,
-            'bias_regularizer': None}]
+            # biases
+            if 'd' in gen_params:
+                bias_initializer = tf.constant_initializer(
+                    gen_params['d'][pop], dtype=self.dtype)
+            else:
+                bias_initializer = 'zeros'
+
+            # list of dicts specifying (linear) nn to observations
+            nn_params = [{
+                'units': dim_obs[pop],
+                'activation': 'linear',
+                'kernel_initializer': kernel_initializer,
+                'bias_initializer': bias_initializer,
+                'kernel_regularizer': None,
+                'bias_regularizer': None}]
 
         super().__init__(
             dim_obs=dim_obs, dim_latent=dim_latent,
@@ -610,7 +612,7 @@ class LDS(FLDS):
             gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
 
 
-class LDSCoupled(FLDSCoupled):
+class NetLDSCoupled(NetFLDSCoupled):
 
     def __init__(
             self, dim_obs=None, dim_latent=None, post_z_samples=None,
@@ -619,28 +621,33 @@ class LDSCoupled(FLDSCoupled):
         if gen_params is None:
             gen_params = {}
 
-        # emissions matrix
-        if 'C' in gen_params:
-            kernel_initializer = tf.constant_initializer(
-                gen_params['C'], dtype=self.dtype)
-        else:
-            kernel_initializer = 'trunc_normal'
+        # iterate through populations
+        # NOTE: must set kernel/bias initializers outside of this constructor
+        # for now since NetFLDS assumes nn_params is the same for each pop
+        for pop, _ in enumerate(dim_obs):
 
-        # biases
-        if 'd' in gen_params:
-            bias_initializer = tf.constant_initializer(
-                gen_params['d'], dtype=self.dtype)
-        else:
-            bias_initializer = 'zeros'
+            # emissions matrix
+            if 'C' in gen_params:
+                kernel_initializer = tf.constant_initializer(
+                    gen_params['C'][pop], dtype=self.dtype)
+            else:
+                kernel_initializer = 'trunc_normal'
 
-        # list of dicts specifying (linear) nn to observations
-        nn_params = [{
-            'units': dim_obs,
-            'activation': 'linear',
-            'kernel_initializer': kernel_initializer,
-            'bias_initializer': bias_initializer,
-            'kernel_regularizer': None,
-            'bias_regularizer': None}]
+            # biases
+            if 'd' in gen_params:
+                bias_initializer = tf.constant_initializer(
+                    gen_params['d'][pop], dtype=self.dtype)
+            else:
+                bias_initializer = 'zeros'
+
+            # list of dicts specifying (linear) nn to observations
+            nn_params = [{
+                'units': dim_obs[pop],
+                'activation': 'linear',
+                'kernel_initializer': kernel_initializer,
+                'bias_initializer': bias_initializer,
+                'kernel_regularizer': None,
+                'bias_regularizer': None}]
 
         super().__init__(
             dim_obs=dim_obs, dim_latent=dim_latent,

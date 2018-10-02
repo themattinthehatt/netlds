@@ -30,7 +30,7 @@ class Network(object):
     def _parse_nn_options(self, nn_options):
         """Specify architecture of decoding network and set defaults"""
 
-        self.nn_params = []
+        self.params = []
         for layer_num, layer_options in enumerate(nn_options):
 
             # start with _layer_defaults
@@ -88,11 +88,11 @@ class Network(object):
             # make sure output is correct size
             if layer_num == len(nn_options) - 1:
                 layer_params['units'] = self.output_dim
-            self.nn_params.append(dict(layer_params))
+            self.params.append(dict(layer_params))
 
     def build_graph(self):
 
-        for _, layer_params in enumerate(self.nn_params):
+        for _, layer_params in enumerate(self.params):
             self.layers.append(tf.layers.Dense(**layer_params))
 
     def apply_network(self, network_input):
