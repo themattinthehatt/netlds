@@ -39,12 +39,12 @@ class Model(object):
         # location of generative model params if not part of Model
         self.checkpoint = None
 
-        # set parameters for graph (constructed for each train)
+        # set parameters for graph
         self.graph = None
         self.saver = None
         self.merge_summaries = None
         self.init = None
-        self.sess_config = None
+        self.sess_config = tf.ConfigProto(device_count={'GPU': 1})  # gpu def
         self.np_seed = np_seed
         self.tf_seed = tf_seed
 
@@ -100,6 +100,8 @@ class Model(object):
             ValueError: for incorrect `ztype` values
 
         """
+
+        self._check_graph()
 
         # intialize session
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
@@ -200,10 +202,6 @@ class Model(object):
         if not os.path.isfile(checkpoint_file + '.meta'):
             raise ValueError(
                 str('"%s" is not a valid filename' % checkpoint_file))
-
-        # build graph if it doesn't exist
-        if self.graph is None:
-            self.build_graph()
 
         # restore saved variables into tf Variables
         self.saver.restore(sess, checkpoint_file)
@@ -309,6 +307,10 @@ class Model(object):
 
         return model
 
+    def _check_graph(self):
+        if self.graph is None:
+            self.build_graph()
+
 
 class DynamicalModel(Model):
     """
@@ -333,7 +335,7 @@ class DynamicalModel(Model):
 
         """
 
-        super(DynamicalModel, self).__init__(
+        super().__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
             np_seed=np_seed, tf_seed=tf_seed)
@@ -387,6 +389,8 @@ class DynamicalModel(Model):
 
         """
 
+        self._check_graph()
+
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             params = self.gen_net.get_params(sess)
@@ -409,6 +413,8 @@ class DynamicalModel(Model):
             posterior_means (num_samples x num_time_pts x dim_latent tf.Tensor)
 
         """
+
+        self._check_graph()
 
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
@@ -441,6 +447,8 @@ class DynamicalModel(Model):
 
         if indxs is None:
             indxs = list(range(observations.shape[0]))
+
+        self._check_graph()
 
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
@@ -476,7 +484,7 @@ class LDSModel(DynamicalModel):
 
         """
 
-        super(LDSModel, self).__init__(
+        super().__init__(
             inf_network=inf_network, inf_network_params=inf_network_params,
             gen_model=gen_model, gen_model_params=gen_model_params,
             np_seed=np_seed, tf_seed=tf_seed)
