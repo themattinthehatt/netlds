@@ -54,7 +54,7 @@ class SmoothingLDS(InferenceNetwork):
             self, dim_input=None, dim_latent=None, num_mc_samples=1,
             num_time_pts=None, nn_params=None):
 
-        super(SmoothingLDS, self).__init__(
+        super().__init__(
             dim_input=dim_input, dim_latent=dim_latent,
             num_mc_samples=num_mc_samples)
 
@@ -168,9 +168,10 @@ class SmoothingLDS(InferenceNetwork):
 
         self.AQ0_invA_Q_inv = tf.matmul(
             tf.matmul(self.A, self.Q0_inv), self.A, transpose_b=True) \
-                            + self.Q_inv
+            + self.Q_inv
         self.AQ_invA_Q_inv = tf.matmul(
-            tf.matmul(self.A, self.Q_inv), self.A, transpose_b=True) + self.Q_inv
+            tf.matmul(self.A, self.Q_inv), self.A, transpose_b=True) \
+            + self.Q_inv
         self.AQ0_inv = tf.matmul(-self.A, self.Q0_inv)
         self.AQ_inv = tf.matmul(-self.A, self.Q_inv)
 
@@ -347,98 +348,108 @@ class MeanFieldGaussian(InferenceNetwork):
 
     def __init__(
             self, dim_input=None, dim_latent=None, num_mc_samples=1,
-            num_time_pts=None):
+            num_time_pts=None, nn_params=None):
 
         super().__init__(
-            dim_input=dim_input, dim_latent=dim_latent)
+            dim_input=dim_input, dim_latent=dim_latent,
+            num_mc_samples=num_mc_samples)
 
         self.num_time_pts = num_time_pts
-        self.num_mc_samples = num_mc_samples
+        self.nn_params = nn_params
 
-    def build_graph(self):
+        # initialize networks
+
+        # default inference network
+        if self.nn_params is None:
+            layer_params = {
+                'units': 30,
+                'activation': 'tanh',
+                'kernel_initializer': 'trunc_normal',
+                'kernel_regularizer': None,
+                'bias_initializer': 'zeros',
+                'bias_regularizer': None}
+            self.nn_params = [layer_params, layer_params]
+        self.network = Network(
+            output_dim=30, nn_params=self.nn_params)
+
+        # inference network -> means
+        layer_z_mean_params = [{
+            'units': self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_means'}]
+        self.layer_z_mean = Network(
+            output_dim=self.dim_latent, nn_params=layer_z_mean_params)
+
+        # inference network -> log vars
+        layer_z_var_params = [{
+            'units': self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_log_vars'}]
+        self.layer_z_log_vars = Network(
+            output_dim=self.dim_latent, nn_params=layer_z_var_params)
+
+    def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
-
-        # should eventually become user options
-        tr_norm_initializer = tf.initializers.truncated_normal(
-            mean=0.0, stddev=0.1, dtype=self.dtype)
-        zeros_initializer = tf.initializers.zeros(dtype=self.dtype)
-        activation = tf.nn.tanh
-        use_bias = True
-        kernel_initializer = tr_norm_initializer
-        bias_initializer = zeros_initializer
-        kernel_regularizer = None
-        bias_regularizer = None
-        num_layers = 2
 
         # construct data pipeline
         with tf.variable_scope('inference_input'):
-            self.input_ph = tf.placeholder(
-                dtype=self.dtype,
-                shape=[None, self.num_time_pts, self.dim_input],
-                name='obs_in_ph')
-            self.samples_z = tf.random_normal(
-                shape=[tf.shape(self.input_ph)[0],
-                       self.num_time_pts,
-                       self.dim_latent],
-                mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+            self._initialize_inference_input()
 
         with tf.variable_scope('inference_mlp'):
-            # store layers in a list
-            self.layers = []
-            for l in range(num_layers):
-                self.layers.append(tf.layers.Dense(
-                    units=30,
-                    activation=activation,
-                    use_bias=use_bias,
-                    kernel_initializer=kernel_initializer,
-                    bias_initializer=bias_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    bias_regularizer=bias_regularizer,
-                    name='layer_%02i' % l))
+            self._build_inference_mlp()
 
-            self.layer_z_mean = tf.layers.Dense(
-                units=self.dim_latent,
-                activation=None,
-                use_bias=use_bias,
-                kernel_initializer=kernel_initializer,
-                bias_initializer=bias_initializer,
-                kernel_regularizer=kernel_regularizer,
-                bias_regularizer=bias_regularizer,
-                name='layer_z_mean')
-            self.layer_z_log_vars = tf.layers.Dense(
-                units=self.dim_latent,
-                activation=None,
-                use_bias=use_bias,
-                kernel_initializer=kernel_initializer,
-                bias_initializer=bias_initializer,
-                kernel_regularizer=kernel_regularizer,
-                bias_regularizer=bias_regularizer,
-                name='layer_z_log_vars')
-
-            # compute layer outputs from inference network input
-            layer_input = self.input_ph
-            for l in range(num_layers):
-                layer_input = self.layers[l].apply(layer_input)
-            self.hidden_act = layer_input
-
-            # get data-dependent mean
-            self.post_z_means = self.layer_z_mean.apply(self.hidden_act)
-
-            # get sqrt of inverse of data-dependent covariances
-            self.post_z_log_vars = self.layer_z_log_vars.apply(self.hidden_act)
-
-        # sample from posterior
         with tf.variable_scope('posterior_samples'):
+            self._build_posterior_samples()
 
-            rands = tf.multiply(
-                tf.sqrt(tf.exp(self.post_z_log_vars)), self.samples_z)
-            self.post_z_samples = self.post_z_means + rands
+    def _initialize_inference_input(self):
+
+        self.input_ph = tf.placeholder(
+            dtype=self.dtype,
+            shape=[None, self.num_time_pts, self.dim_input],
+            name='obs_in_ph')
+        self.samples_z = tf.random_normal(
+            shape=[tf.shape(self.input_ph)[0],
+                   self.num_mc_samples, self.num_time_pts, self.dim_latent],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+
+    def _build_inference_mlp(self):
+
+        self.network.build_graph()
+        self.layer_z_mean.build_graph()
+        self.layer_z_log_vars.build_graph()
+
+        # compute layer outputs from inference network input
+        self.hidden_act = self.network.apply_network(self.input_ph)
+
+        # get data-dependent mean
+        self.post_z_means = self.layer_z_mean.apply_network(self.hidden_act)
+
+        # get sqrt of inverse of data-dependent covariances
+        self.post_z_log_vars = self.layer_z_log_vars.apply_network(
+            self.hidden_act)
+
+    def _build_posterior_samples(self):
+
+        # keep log-vars in reasonable range
+        #temp0 = 5.0 * tf.tanh(self.post_z_log_vars / 5.0)
+        temp0 = self.post_z_log_vars
+        temp = tf.exp(tf.expand_dims(temp0, axis=1))
+        rands = tf.multiply(tf.sqrt(temp), self.samples_z)
+
+        self.post_z_samples = tf.expand_dims(self.post_z_means, axis=1) + rands
 
     def entropy(self):
         """Entropy of approximate posterior"""
 
-        ln_det = -2.0 * tf.reduce_sum(
-            tf.reduce_mean(self.post_z_log_vars, axis=0))
+        ln_det = tf.reduce_sum(tf.reduce_mean(self.post_z_log_vars, axis=0))
 
         entropy = ln_det / 2.0 + self.dim_latent * self.num_time_pts / 2.0 * (
                     1.0 + np.log(2.0 * np.pi))
@@ -493,7 +504,7 @@ class MeanFieldGaussianTemporal(MeanFieldGaussian):
             dim_input=dim_input, dim_latent=dim_latent,
             num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
 
-    def build_graph(self):
+    def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
         pass
 

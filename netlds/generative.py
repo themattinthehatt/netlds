@@ -239,8 +239,15 @@ class NetFLDS(GenerativeModel):
                     dtype=self.dtype.as_numpy_dtype()),
                 dtype=self.dtype)
 
-        Q0 = tf.matmul(Q0_sqrt, Q0_sqrt, transpose_b=True, name='Q0')
-        Q = tf.matmul(Q_sqrt, Q_sqrt, transpose_b=True, name='Q')
+        # diag = tf.constant(1.0 * np.eye(
+        #     sum(self.dim_latent), dtype=self.dtype.as_numpy_dtype),
+        #     name='small_const')
+        diag = tf.constant(1e-6 * np.eye(
+            sum(self.dim_latent), dtype=self.dtype.as_numpy_dtype),
+            name='small_const')
+
+        Q0 = tf.matmul(Q0_sqrt, Q0_sqrt, transpose_b=True, name='Q0') + diag
+        Q = tf.matmul(Q_sqrt, Q_sqrt, transpose_b=True, name='Q') + diag
         Q0_inv = tf.matrix_inverse(Q0, name='Q0_inv')
         Q_inv = tf.matrix_inverse(Q, name='Q_inv')
 
@@ -272,7 +279,7 @@ class NetFLDS(GenerativeModel):
                     initializer=tr_norm_initializer,
                     dtype=self.dtype))
             self.R.append(tf.square(self.R_sqrt[pop]))
-            self.R_inv.append(1.0 / self.R[pop])
+            self.R_inv.append(1.0 / (self.R[pop] + 1e-6))
 
     def _sample_yz(self):
         """
@@ -413,7 +420,7 @@ class NetFLDS(GenerativeModel):
 
                     # sum over time and observation dimensions
                     log_density_y.append(tf.reduce_sum(log_density_ya))
-                    tf.summary.scalar('log_joint_like', log_density_y)
+                    tf.summary.scalar('log_joint_like', log_density_y[-1])
 
                 else:
                     raise ValueError
@@ -421,8 +428,8 @@ class NetFLDS(GenerativeModel):
         return tf.add_n(log_density_y, name='log_joint_like_total')
 
     def _log_density_prior(self, z):
-        res_z0 = z[:, :, 0, :] - self.z0_mean
-        res_z = z[:, :, 1:, :] - tf.tensordot(
+        self.res_z0 = res_z0 = z[:, :, 0, :] - self.z0_mean
+        self.res_z = res_z = z[:, :, 1:, :] - tf.tensordot(
             z[:, :, :-1, :], tf.transpose(self.A), axes=[[3], [0]])
 
         # average over batch and mc sample dimensions
@@ -439,13 +446,23 @@ class NetFLDS(GenerativeModel):
         tf.summary.scalar('log_joint_prior', -0.5 * test_prior)
         tf.summary.scalar('log_joint_prior0', -0.5 * test_prior0)
 
+        tf.summary.scalar('Q', tf.reduce_sum(tf.diag_part(self.Q)))
+        tf.summary.scalar('Q0', tf.reduce_sum(tf.diag_part(self.Q0)))
+        tf.summary.scalar('Q_inv', tf.reduce_sum(tf.diag_part(self.Q_inv)))
+        tf.summary.scalar('Q0_inv', tf.reduce_sum(tf.diag_part(self.Q0_inv)))
+        tf.summary.scalar('Q_md', tf.matrix_determinant(self.Q_inv))
+        tf.summary.scalar('Q0_md', tf.matrix_determinant(self.Q0_inv))
+
+        tf.summary.scalar('Q0_11', self.Q0_inv[0, 0])
+        tf.summary.scalar('Q0_12', self.Q0_inv[0, 1])
+        tf.summary.scalar('Q0_21', self.Q0_inv[1, 0])
+        tf.summary.scalar('Q0_22', self.Q0_inv[1, 1])
+
         # total term for prior
         log_density_z = -0.5 * (test_prior + test_prior0
-                                + (self.num_time_pts - 1) * tf.log(
-                    tf.matrix_determinant(self.Q))
-                                + tf.log(tf.matrix_determinant(self.Q0))
-                                + self.num_time_pts * sum(
-                    self.dim_latent) * tf.log(2.0 * np.pi))
+            + (self.num_time_pts - 1) * tf.log(tf.matrix_determinant(self.Q))
+            + tf.log(tf.matrix_determinant(self.Q0))
+            + self.num_time_pts * sum(self.dim_latent) * tf.log(2.0 * np.pi))
 
         return log_density_z
 
@@ -611,6 +628,10 @@ class FLDS(NetFLDS):
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
             gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
 
+    def sample(self, sess, num_samples=1, seed=None):
+        y, z = super().sample(sess, num_samples, seed)
+        return y[0], z
+
 
 class LDS(NetFLDS):
     """
@@ -667,6 +688,10 @@ class LDS(NetFLDS):
             dim_obs=[dim_obs], dim_latent=[dim_latent],
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
             gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
+
+    def sample(self, sess, num_samples=1, seed=None):
+        y, z = super().sample(sess, num_samples, seed)
+        return y[0], z
 
     def get_params(self, sess):
         """Get parameters of generative model"""
