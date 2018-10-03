@@ -446,18 +446,6 @@ class NetFLDS(GenerativeModel):
         tf.summary.scalar('log_joint_prior', -0.5 * test_prior)
         tf.summary.scalar('log_joint_prior0', -0.5 * test_prior0)
 
-        tf.summary.scalar('Q', tf.reduce_sum(tf.diag_part(self.Q)))
-        tf.summary.scalar('Q0', tf.reduce_sum(tf.diag_part(self.Q0)))
-        tf.summary.scalar('Q_inv', tf.reduce_sum(tf.diag_part(self.Q_inv)))
-        tf.summary.scalar('Q0_inv', tf.reduce_sum(tf.diag_part(self.Q0_inv)))
-        tf.summary.scalar('Q_md', tf.matrix_determinant(self.Q_inv))
-        tf.summary.scalar('Q0_md', tf.matrix_determinant(self.Q0_inv))
-
-        tf.summary.scalar('Q0_11', self.Q0_inv[0, 0])
-        tf.summary.scalar('Q0_12', self.Q0_inv[0, 1])
-        tf.summary.scalar('Q0_21', self.Q0_inv[1, 0])
-        tf.summary.scalar('Q0_22', self.Q0_inv[1, 1])
-
         # total term for prior
         log_density_z = -0.5 * (test_prior + test_prior0
             + (self.num_time_pts - 1) * tf.log(tf.matrix_determinant(self.Q))

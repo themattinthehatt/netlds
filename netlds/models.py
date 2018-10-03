@@ -176,7 +176,7 @@ class Model(object):
             self.checkpoint = checkpoint_file
 
         if print_filepath:
-            print('Model checkpointed to %s' % checkpoint_file)
+            print('model checkpointed to %s' % checkpoint_file)
 
     def restore_model(self, sess, checkpoint_file=None):
         """
@@ -200,6 +200,10 @@ class Model(object):
         if not os.path.isfile(checkpoint_file + '.meta'):
             raise ValueError(
                 str('"%s" is not a valid filename' % checkpoint_file))
+
+        # build graph if it doesn't exist
+        if self.graph is None:
+            self.build_graph()
 
         # restore saved variables into tf Variables
         self.saver.restore(sess, checkpoint_file)
@@ -243,14 +247,14 @@ class Model(object):
         if self.checkpoint is not None:
             constructor_inputs['checkpoint_file'] = self.checkpoint
         else:
-            print('Warning: model has not been checkpointed; restoring this '
+            print('warning: model has not been checkpointed; restoring this '
                   'model will result in random parameters')
             constructor_inputs['checkpoint_file'] = None
 
         with open(save_file, 'wb') as f:
             pickle.dump(constructor_inputs, f)
 
-        print('Model pickled to %s' % save_file)
+        print('model pickled to %s' % save_file)
 
     @classmethod
     def load_model(cls, save_file):
@@ -273,7 +277,7 @@ class Model(object):
         with open(save_file, 'rb') as f:
             constructor_inputs = pickle.load(f)
 
-        print('Model loaded from %s' % save_file)
+        print('model loaded from %s' % save_file)
 
         # extract model class to use as constructor
         model_class = constructor_inputs['model_class']
@@ -289,7 +293,7 @@ class Model(object):
         checkpoint_file = constructor_inputs['checkpoint_file']
         del constructor_inputs['checkpoint_file']
         if checkpoint_file is None:
-            print('Warning: model has not been checkpointed; restoring this '
+            print('warning: model has not been checkpointed; restoring this '
                   'model will result in random parameters')
 
         # initialize model

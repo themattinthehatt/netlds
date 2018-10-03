@@ -485,7 +485,7 @@ class MeanFieldGaussian(InferenceNetwork):
         return sess.run(self.post_z_means, feed_dict=feed_dict)
 
 
-class MeanFieldGaussianTemporal(MeanFieldGaussian):
+class MeanFieldGaussianTemporal(InferenceNetwork):
     """
     Approximate posterior is modeled as a fully factorized Gaussian in time, so
     that for x = [x_1, ..., x_T]
@@ -498,15 +498,128 @@ class MeanFieldGaussianTemporal(MeanFieldGaussian):
 
     def __init__(
             self, dim_input=None, dim_latent=None, num_mc_samples=1,
-            num_time_pts=None):
+            num_time_pts=None, nn_params=None):
 
         super().__init__(
             dim_input=dim_input, dim_latent=dim_latent,
-            num_time_pts=num_time_pts, num_mc_samples=num_mc_samples)
+            num_mc_samples=num_mc_samples)
+
+        self.num_time_pts = num_time_pts
+        self.nn_params = nn_params
+
+        # initialize networks
+
+        # default inference network
+        if self.nn_params is None:
+            layer_params = {
+                'units': 30,
+                'activation': 'tanh',
+                'kernel_initializer': 'trunc_normal',
+                'kernel_regularizer': None,
+                'bias_initializer': 'zeros',
+                'bias_regularizer': None}
+            self.nn_params = [layer_params, layer_params]
+        self.network = Network(
+            output_dim=30, nn_params=self.nn_params)
+
+        # inference network -> means
+        layer_z_mean_params = [{
+            'units': self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_means'}]
+        self.layer_z_mean = Network(
+            output_dim=self.dim_latent, nn_params=layer_z_mean_params)
+
+        # inference network -> log vars
+        layer_z_var_params = [{
+            'units': self.dim_latent * self.dim_latent,
+            'activation': 'identity',
+            'kernel_initializer': 'trunc_normal',
+            'kernel_regularizer': None,
+            'bias_initializer': 'zeros',
+            'bias_regularizer': None,
+            'name': 'z_stddev'}]
+        self.layer_z_vars = Network(
+            output_dim=self.dim_latent * self.dim_latent,
+            nn_params=layer_z_var_params)
 
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
-        pass
+
+        # construct data pipeline
+        with tf.variable_scope('inference_input'):
+            self._initialize_inference_input()
+
+        with tf.variable_scope('inference_mlp'):
+            self._build_inference_mlp()
+
+        with tf.variable_scope('posterior_samples'):
+            self._build_posterior_samples()
+
+    def _initialize_inference_input(self):
+
+        self.input_ph = tf.placeholder(
+            dtype=self.dtype,
+            shape=[None, self.num_time_pts, self.dim_input],
+            name='obs_in_ph')
+        self.samples_z = tf.random_normal(
+            shape=[tf.shape(self.input_ph)[0],
+                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+
+    def _build_inference_mlp(self):
+
+        self.network.build_graph()
+        self.layer_z_mean.build_graph()
+        self.layer_z_vars.build_graph()
+
+        # compute layer outputs from inference network input
+        self.hidden_act = self.network.apply_network(self.input_ph)
+
+        # get data-dependent mean
+        self.post_z_means = self.layer_z_mean.apply_network(self.hidden_act)
+
+        # get sqrt of inverse of data-dependent covariances
+        r_psi_sqrt = self.layer_z_vars.apply_network(self.hidden_act)
+        self.r_psi_sqrt = tf.reshape(
+            r_psi_sqrt,
+            [-1, self.num_time_pts, self.dim_latent, self.dim_latent])
+
+    def _build_posterior_samples(self):
+
+        def sample_batch(outputs, inputs):
+            # samples: num_time_pts x dim_latent x num_mc_samples
+            # cov_chol: num_time_pts x dim_latent x dim_latent
+            z_samples, cov_chol = inputs
+            # scan over time dimension
+            samples = tf.scan(
+                fn=sample_time,
+                elems=[z_samples, cov_chol],
+                initializer=z_samples[0])  # throwaway for scan to behave
+            return samples
+
+        def sample_time(outputs, inputs):
+            # samples: dim_latent x num_mc_samples
+            # cov_chol: dim_latent x dim_latent
+            z_samples, cov_chol = inputs
+            # scan over time dimension
+            samples = tf.matmul(cov_chol, z_samples)
+            return samples
+
+        # scan over batch dimension
+        # returns num_batches x num_time_pts x dim_latent x num_mc_samples
+        rands_shuff = tf.scan(
+            fn=sample_batch,
+            elems=[self.samples_z, self.r_psi_sqrt],
+            initializer=self.samples_z[0])  # throwaway for scan to behave
+
+        rands = tf.transpose(rands_shuff, perm=[0, 3, 1, 2])
+
+        self.post_z_samples = tf.expand_dims(self.post_z_means, axis=1) + rands
 
     def entropy(self):
         """Entropy of approximate posterior"""
@@ -514,11 +627,58 @@ class MeanFieldGaussianTemporal(MeanFieldGaussian):
         # determinant of the covariance is the square of the determinant of the
         # cholesky factor; determinant of the cholesky factor is the product of
         # the diagonal elements of the block-diagonal
-        ln_det = -2.0 * tf.reduce_sum(
-            tf.reduce_mean(
-                tf.log(tf.matrix_diag_part(self.chol_decomp_Sinv[0])), axis=0))
+        def det_loop_batch(outputs, inputs):
+            # inputs: num_time_dims x dim_latent x dim_latent
+            # now scan over over time
+            out = tf.scan(
+                fn=det_loop_time, elems=inputs, initializer=0.0)
+            return out
+
+        def det_loop_time(outputs, inputs):
+            # inputs is dim_latent x dim_latent matrix
+            return tf.matrix_determinant(tf.matmul(
+                inputs, inputs, transpose_b=True))
+
+        # for each batch, scan over time, calculating det of time blocks; det
+        # of full matrix is product of determinants over blocks
+        self.dets = dets = tf.scan(
+            fn=det_loop_batch, elems=self.r_psi_sqrt,
+            initializer=self.r_psi_sqrt[0, :, 0, 0], infer_shape=False)
+        # shape of initializer must match shape of returned element; in this
+        # case a single scalar (the determinant) for each time point
+
+        # mean over batch dimension, sum over time dimension
+        ln_det = 2.0 * tf.reduce_sum(tf.reduce_mean(tf.log(dets), axis=0))
 
         entropy = ln_det / 2.0 + self.dim_latent * self.num_time_pts / 2.0 * (
                     1.0 + np.log(2.0 * np.pi))
 
         return entropy
+
+    def sample(self, sess, observations, seed=None):
+        """
+        Draw samples from approximate posterior
+
+        Args:
+            sess (tf.Session object)
+            observations (batch_size x num_time_pts x num_inputs numpy array)
+            seed (int, optional)
+
+        Returns:
+            batch_size x num_mc_samples x num_time_pts x dim_latent numpy array
+
+        """
+
+        if seed is not None:
+            tf.set_random_seed(seed)
+
+        return sess.run(
+            self.post_z_samples,
+            feed_dict={self.input_ph: observations})
+
+    def get_posterior_means(self, sess, observations):
+        """Get posterior means conditioned on observations"""
+
+        feed_dict = {self.input_ph: observations}
+
+        return sess.run(self.post_z_means, feed_dict=feed_dict)
