@@ -10,7 +10,7 @@ DTYPE = np.float32
 
 
 def build_model(
-        num_time_pts, dim_obs, dim_latent, np_seed=0, tf_seed=0,
+        num_time_pts, dim_obs, dim_latent, num_layers=0, np_seed=0, tf_seed=0,
         obs_noise='gaussian'):
     """
     Build netlds model to simulate data
@@ -19,6 +19,8 @@ def build_model(
         num_time_pts (int): number of time points per trial
         dim_obs (int): number of observation dimensions
         dim_latent (int): number of latent space dimensions
+        num_layers (int): number of nn layers between latent space and
+            observations
         np_seed (int, optional): numpy rng seed
         tf_seed (int, optional): tensorflow rng seed
         obs_noise (str, optional): distribution of observation noise
@@ -34,17 +36,36 @@ def build_model(
     tf.set_random_seed(tf_seed)
 
     # define model parameters
-    A = np.array([[1.0, 0.9], [-0.9, 0.01]], dtype=DTYPE)
-    z0_mean = np.array([[0.4, 0.3]], dtype=DTYPE)
-    Q = 0.03 * np.random.randn(2, 2).astype(DTYPE)
+    if dim_latent == 2:
+        A = np.array([[1.0, 0.9], [-0.9, 0.01]], dtype=DTYPE)
+        z0_mean = np.array([[0.4, 0.3]], dtype=DTYPE)
+    else:
+        A = get_random_rotation_matrix(dim_latent)
+        z0_mean = np.random.rand(1, dim_latent).astype(DTYPE)
+
+    Q = 0.03 * np.random.randn(dim_latent, dim_latent).astype(DTYPE)
     Q = np.matmul(Q, Q.T)
     Q_sqrt = np.linalg.cholesky(Q)
-    C = np.random.randn(dim_latent, dim_obs).astype(DTYPE)
-    d = np.abs(np.random.randn(1, dim_obs).astype(DTYPE))
 
-    gen_params = {
-        'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt,
-        'C': C, 'd': d}
+    if num_layers == 0:
+        C = np.random.randn(dim_latent, dim_obs).astype(DTYPE)
+        d = np.abs(np.random.randn(1, dim_obs).astype(DTYPE))
+        gen_params = {
+            'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt,
+            'C': C, 'd': d}
+        nn_params = None
+    else:
+        gen_params = {
+            'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt}
+        nn_params = []
+        for i in range(num_layers):
+            nn_params.append({
+                'units': 15,
+                'activation': 'tanh',
+                'kernel_initializer': 'normal',
+                'kernel_regularizer': None,
+                'bias_initializer': 'zeros',
+                'bias_regularizer': None})
 
     # specify inference network for approximate posterior
     inf_network = SmoothingLDS
@@ -54,7 +75,11 @@ def build_model(
         'num_time_pts': num_time_pts}
 
     # specify probabilistic model
-    gen_model = LDS
+    if num_layers == 0:
+        gen_model = LDS
+    else:
+        gen_model = FLDS
+
     if obs_noise is 'gaussian':
         R_sqrt = np.sqrt(0.05 * np.random.uniform(
             size=(1, dim_obs)).astype(DTYPE))
@@ -65,6 +90,7 @@ def build_model(
         'dim_latent': dim_latent,
         'num_time_pts': num_time_pts,
         'noise_dist': obs_noise,
+        'nn_params': nn_params,
         'gen_params': gen_params}
 
     # initialize model

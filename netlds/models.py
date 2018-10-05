@@ -397,13 +397,13 @@ class DynamicalModel(Model):
 
         return params
 
-    def get_posterior_means(self, observations=None, checkpoint_file=None):
+    def get_posterior_means(self, input_data=None, checkpoint_file=None):
         """
         Get posterior means from inference network
 
         Args:
-            observations (num_samples x num_time_pts x dim_obs tf.Tensor):
-                observations on which to condition the posterior means
+            input_data (num_samples x num_time_pts x dim_obs tf.Tensor):
+                data on which to condition the posterior means
             checkpoint_file (str, optional): location of checkpoint file
                 specifying model from which to generate samples; if `None`,
                 will then look for a checkpoint file created upon model
@@ -419,7 +419,7 @@ class DynamicalModel(Model):
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             posterior_means = self.inf_net.get_posterior_means(
-                sess, observations)
+                sess, input_data)
 
         return posterior_means
 

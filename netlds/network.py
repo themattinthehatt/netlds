@@ -71,7 +71,7 @@ class Network(object):
                             or key is 'bias_initializer':
                         if value is 'normal':
                             value = tf.initializers.random_normal(
-                                mean=0.0, stddev=0.1, dtype=self.dtype)
+                                mean=0.0, stddev=1.0, dtype=self.dtype)
                         elif value is 'trunc_normal':
                             value = tf.initializers.truncated_normal(
                                 mean=0.0, stddev=0.1, dtype=self.dtype)

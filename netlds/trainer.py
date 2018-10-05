@@ -432,11 +432,11 @@ class Trainer(object):
                 model.gen_net.outputs_ph:
                     observations[batch_indxs, :, :],
                 model.inf_net.input_ph:
-                    observations[batch_indxs, :, :]}
+                    input_data[batch_indxs, :, :]}
         else:
             feed_dict = {
                 model.gen_net.outputs_ph: observations,
-                model.inf_net.input_ph: observations}
+                model.inf_net.input_ph: input_data}
 
         return feed_dict
 

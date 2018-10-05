@@ -324,10 +324,10 @@ class SmoothingLDS(InferenceNetwork):
 
         return param_dict
 
-    def get_posterior_means(self, sess, observations):
-        """Get posterior means conditioned on observations"""
+    def get_posterior_means(self, sess, input_data):
+        """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: observations}
+        feed_dict = {self.input_ph: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)
 
@@ -477,10 +477,10 @@ class MeanFieldGaussian(InferenceNetwork):
             self.post_z_samples,
             feed_dict={self.input_ph: observations})
 
-    def get_posterior_means(self, sess, observations):
-        """Get posterior means conditioned on observations"""
+    def get_posterior_means(self, sess, input_data):
+        """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: observations}
+        feed_dict = {self.input_ph: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)
 
@@ -637,7 +637,8 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
         def det_loop_time(outputs, inputs):
             # inputs is dim_latent x dim_latent matrix
             return tf.matrix_determinant(tf.matmul(
-                inputs, inputs, transpose_b=True))
+                inputs, inputs, transpose_b=True)
+                + 1e-6 * np.eye(self.dim_latent))
 
         # for each batch, scan over time, calculating det of time blocks; det
         # of full matrix is product of determinants over blocks
@@ -648,7 +649,7 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
         # case a single scalar (the determinant) for each time point
 
         # mean over batch dimension, sum over time dimension
-        ln_det = 2.0 * tf.reduce_sum(tf.reduce_mean(tf.log(dets), axis=0))
+        ln_det = tf.reduce_sum(tf.reduce_mean(tf.log(dets), axis=0))
 
         entropy = ln_det / 2.0 + self.dim_latent * self.num_time_pts / 2.0 * (
                     1.0 + np.log(2.0 * np.pi))
@@ -676,9 +677,9 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
             self.post_z_samples,
             feed_dict={self.input_ph: observations})
 
-    def get_posterior_means(self, sess, observations):
-        """Get posterior means conditioned on observations"""
+    def get_posterior_means(self, sess, input_data):
+        """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: observations}
+        feed_dict = {self.input_ph: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)

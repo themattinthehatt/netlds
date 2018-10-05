@@ -168,7 +168,7 @@ class NetFLDS(GenerativeModel):
                     self.networks[pop].build_graph()
                     indx_end = indx_start + pop_dim_latent
                     self.latent_indxs.append(
-                        np.arange(indx_start, indx_end + 1, dtype=np.int32))
+                        np.arange(indx_start, indx_end+1, dtype=np.int32))
                     self.y_pred.append(self.networks[pop].apply_network(
                         z_samples[:, :, :, indx_start:indx_end]))
                     indx_start = indx_end
