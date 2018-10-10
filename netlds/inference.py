@@ -135,11 +135,7 @@ class SmoothingLDS(InferenceNetwork):
         self.input_ph = tf.placeholder(
             dtype=self.dtype,
             shape=[None, self.num_time_pts, self.dim_input],
-            name='obs_in_ph')
-        self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
-                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
-            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+            name='input_ph')
 
     def _build_inference_mlp(self):
 
@@ -240,6 +236,11 @@ class SmoothingLDS(InferenceNetwork):
             initializer=ia[0])  # throwaway to get scan to behave
 
     def _build_posterior_samples(self):
+
+        self.samples_z = tf.random_normal(
+            shape=[tf.shape(self.input_ph)[0],
+                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
         # get posterior sample(s) for each element in batch
         def scan_chol_half_inv(_, inputs):
@@ -414,11 +415,7 @@ class MeanFieldGaussian(InferenceNetwork):
         self.input_ph = tf.placeholder(
             dtype=self.dtype,
             shape=[None, self.num_time_pts, self.dim_input],
-            name='obs_in_ph')
-        self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
-                   self.num_mc_samples, self.num_time_pts, self.dim_latent],
-            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+            name='input_ph')
 
     def _build_inference_mlp(self):
 
@@ -437,6 +434,11 @@ class MeanFieldGaussian(InferenceNetwork):
             self.hidden_act)
 
     def _build_posterior_samples(self):
+
+        self.samples_z = tf.random_normal(
+            shape=[tf.shape(self.input_ph)[0],
+                   self.num_mc_samples, self.num_time_pts, self.dim_latent],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
         # keep log-vars in reasonable range
         #temp0 = 5.0 * tf.tanh(self.post_z_log_vars / 5.0)
@@ -565,11 +567,7 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
         self.input_ph = tf.placeholder(
             dtype=self.dtype,
             shape=[None, self.num_time_pts, self.dim_input],
-            name='obs_in_ph')
-        self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
-                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
-            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
+            name='input_ph')
 
     def _build_inference_mlp(self):
 
@@ -590,6 +588,11 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
             [-1, self.num_time_pts, self.dim_latent, self.dim_latent])
 
     def _build_posterior_samples(self):
+
+        self.samples_z = tf.random_normal(
+            shape=[tf.shape(self.input_ph)[0],
+                   self.num_time_pts, self.dim_latent, self.num_mc_samples],
+            mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
         def sample_batch(outputs, inputs):
             # samples: num_time_pts x dim_latent x num_mc_samples

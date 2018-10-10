@@ -78,7 +78,7 @@ class Model(object):
 
     def sample(
             self, ztype='prior', num_samples=1, seed=None,
-            checkpoint_file=None):
+            linear_predictors=None, checkpoint_file=None):
         """
         Generate samples from prior/posterior and model
 
@@ -88,13 +88,17 @@ class Model(object):
             num_samples (int, optional)
             seed (int, optional): random seed for reproducibly generating
                 random samples
+            linear_predictors (list of np arrays):
+                1 x num_time_pts x dim_pred;
+                there will be num_samples random samples for this one example
+                of each linear predictor
             checkpoint_file (str, optional): checkpoint file specifying model
                 from which to generate samples; if `None`, will then look for a
                 checkpoint file created upon model initialization
 
         Returns:
-            num_time_pts x dim_obs x num_samples numpy array: y
-            num_time_pts x dim_latent x num_samples numpy array: z
+            num_samples x num_time_pts x dim_obs numpy array: y
+            num_samples x num_time_pts x dim_latent numpy array: z
 
         Raises:
             ValueError: for incorrect `ztype` values
@@ -107,11 +111,13 @@ class Model(object):
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             if ztype is 'prior':
-                y, z = self.gen_net.sample(sess, num_samples, seed)
+                y, z = self.gen_net.sample(
+                    sess, num_samples, seed, linear_predictors)
             elif ztype is 'posterior':
-                # TODO: needs data input as well
+                # TODO: needs input to inference network as well
                 y = None
-                z = self.gen_net.sample_z(sess, num_samples, seed)
+                z = self.gen_net.sample_z(
+                    sess, num_samples, seed, linear_predictors)
             else:
                 raise ValueError('Invalid string "%s" for ztype argument')
 
@@ -379,10 +385,9 @@ class DynamicalModel(Model):
         Get parameters of generative model
 
         Args:
-            checkpoint_file (str, optional): location of checkpoint file
-                specifying model from which to generate samples; if `None`,
-                will then look for a checkpoint file created upon model
-                initialization
+            checkpoint_file (str, optional): location of checkpoint file;
+                if `None`, will then look for a checkpoint file created upon
+                model initialization
 
         Returns:
             params (dict)
@@ -394,6 +399,28 @@ class DynamicalModel(Model):
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             params = self.gen_net.get_params(sess)
+
+        return params
+
+    def get_linear_params(self, checkpoint_file=None):
+        """
+        Get parameters of linear regressors
+
+        Args:
+            checkpoint_file (str, optional): location of checkpoint file;
+                if `None`, will then look for a checkpoint file created upon
+                model initialization
+
+        Returns:
+            params (dict)
+
+        """
+
+        self._check_graph()
+
+        with tf.Session(graph=self.graph, config=self.sess_config) as sess:
+            self.restore_model(sess, checkpoint_file=checkpoint_file)
+            params = self.gen_net.get_linear_params(sess)
 
         return params
 

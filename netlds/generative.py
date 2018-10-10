@@ -57,16 +57,19 @@ class NetFLDS(GenerativeModel):
     """
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
+            self, dim_obs=None, dim_latent=None, linear_predictors=None,
             num_time_pts=None, gen_params=None, noise_dist='gaussian',
-            nn_params=None,):
+            nn_params=None, post_z_samples=None):
         """
         Args:
             dim_obs (list): observation dimension for each population
             dim_latent (list): latent dimension for each population
-            post_z_samples (batch_size x num_mc_samples x num_time_pts x
-                dim_latent tf.Tensor): samples from the (appx) posterior of the
-                latent states
+            linear_predictors (dict):
+                'dim_predictors' (list): dimension for each set of linear
+                    predictors
+                'predictor_indx' (list of lists): each element of the list
+                    contains the indices of the predictors in the
+                    `dim_predictors` list used by the corresponding population
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
@@ -75,12 +78,21 @@ class NetFLDS(GenerativeModel):
             nn_params (list): dictionaries for building each layer of the
                 mapping from the latent space to observations; the same
                 network architecture is used for each population
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
 
         """
 
         GenerativeModel.__init__(self, post_z_samples=post_z_samples)
         self.dim_obs = dim_obs
         self.dim_latent = dim_latent
+        if linear_predictors is None:
+            self.dim_predictors = None
+            self.predictor_indx = None
+        else:
+            self.dim_predictors = linear_predictors['dim_predictors']
+            predictor_indx = linear_predictors['predictor_indx']
 
         self.num_time_pts = num_time_pts
         if gen_params is None:
@@ -102,15 +114,35 @@ class NetFLDS(GenerativeModel):
             nn_params = [{}]
         nn_params[-1]['activation'] = activation
 
-        # build networks
+        # networks mapping latent states to obs for each population
         self.networks = []
         for _, pop_dim in enumerate(dim_obs):
             self.networks.append(
                 Network(output_dim=pop_dim, nn_params=nn_params))
 
+        # networks mapping linear predictors to obs for each population
+        # accessed as self.networks_linear[pop][pred]
+        self.networks_linear = [[None for _ in range(len(self.dim_predictors))]
+                                for _ in range(len(dim_obs))]
+        self.predictor_indx = [[None for _ in range(len(self.dim_predictors))]
+                               for _ in range(len(dim_obs))]
+        # only initialize networks if we have linear predictors
+        if self.dim_predictors is not None:
+            linear_nn_params = [{'activation': 'linear'}]
+            for pop, pop_dim in enumerate(self.dim_obs):
+                for pred, pred_dim in enumerate(self.dim_predictors):
+                    if any(pred_indx == pred
+                           for pred_indx in predictor_indx[pop]):
+                        self.networks_linear[pop][pred] = Network(
+                            output_dim=pop_dim, nn_params=linear_nn_params)
+                        self.predictor_indx[pop][pred] = pred
+
         # initialize lists for other relevant variables
         self.outputs = []
+        self.linear_predictors_phs = []
         self.y_pred = []
+        self.y_pred_ls = []  # latent space
+        self.y_pred_lp = []  # linear predictors
         self.y_samples_prior = []
         self.obs_indxs = []
         self.latent_indxs = []
@@ -146,10 +178,12 @@ class NetFLDS(GenerativeModel):
         # NOTE: requires that `dim_obs` input to constructor is in same order
         # as the data
         with tf.variable_scope('observations'):
+            # one placeholder for all data
             self.outputs_ph = tf.placeholder(
                 dtype=self.dtype,
                 shape=[None, self.num_time_pts, sum(self.dim_obs)],
                 name='outputs_ph')
+            # carve up placeholder into distinct populations
             indx_start = 0
             for pop, pop_dim in enumerate(self.dim_obs):
                 indx_end = indx_start + pop_dim
@@ -159,20 +193,55 @@ class NetFLDS(GenerativeModel):
                     self.outputs_ph[:, :, indx_start:indx_end])
                 indx_start = indx_end
 
-        # initialize mapping from latent space to observations
-        with tf.variable_scope('mapping'):
-            # keep track of which latent states belong to each population
-            indx_start = 0
-            for pop, pop_dim_latent in enumerate(self.dim_latent):
-                with tf.variable_scope(str('population_%02i' % pop)):
+        # initialize placeholders for linear predictors
+        with tf.variable_scope('linear_predictors'):
+            if self.dim_predictors is not None:
+                for pred, dim_pred in enumerate(self.dim_predictors):
+                    self.linear_predictors_phs.append(
+                        tf.placeholder(
+                            dtype=self.dtype,
+                            shape=[None, self.num_time_pts, dim_pred],
+                            name='linear_pred_ph_%02i' % pred))
+
+        # keep track of which latent states belong to each population
+        indx_start = 0
+        for pop, pop_dim_latent in enumerate(self.dim_latent):
+            with tf.variable_scope(str('population_%02i' % pop)):
+                # initialize mapping from latent space to observations
+                with tf.variable_scope('latent_space_mapping'):
                     self.networks[pop].build_graph()
                     indx_end = indx_start + pop_dim_latent
                     self.latent_indxs.append(
                         np.arange(indx_start, indx_end+1, dtype=np.int32))
-                    self.y_pred.append(self.networks[pop].apply_network(
+                    self.y_pred_ls.append(self.networks[pop].apply_network(
                         z_samples[:, :, :, indx_start:indx_end]))
                     indx_start = indx_end
-                    self._initialize_noise_dist_vars(pop)
+                # initialize mapping from linear predictors to observations
+                with tf.variable_scope('regressor_mapping'):
+                    if self.dim_predictors is not None:
+                        # append new list for this population
+                        self.y_pred_lp.append([])
+                        for pred, pred_dim in enumerate(self.dim_predictors):
+                            if self.predictor_indx[pop][pred] is not None:
+                                self.networks_linear[pop][pred].build_graph()
+                                net_out = self.networks_linear[pop][pred].\
+                                    apply_network(
+                                        self.linear_predictors_phs[pred])
+                                # expand network output to match dims of
+                                # samples from latent space:
+                                # batch x num_samps x num_time_pts x dim_latent
+                                self.y_pred_lp[-1].append(tf.expand_dims(
+                                    net_out, axis=1))
+                            # else:
+                            #     self.y_pred_lp[-1].append(0.0)
+
+                # add contributions from latent space and linear predictors
+                if self.dim_predictors is not None:
+                    self.y_pred.append(tf.add(self.y_pred_ls[-1], tf.add_n(
+                        self.y_pred_lp[-1])))
+                else:
+                    self.y_pred.append(self.y_pred_ls[-1])
+                self._initialize_noise_dist_vars(pop)
 
         # define branch of graph for evaluating prior model
         with tf.variable_scope('generative_samples'):
@@ -278,8 +347,8 @@ class NetFLDS(GenerativeModel):
                     shape=[1, self.dim_obs[pop]],
                     initializer=tr_norm_initializer,
                     dtype=self.dtype))
-            self.R.append(tf.square(self.R_sqrt[pop]))
-            self.R_inv.append(1.0 / (self.R[pop] + 1e-6))
+            self.R.append(tf.square(self.R_sqrt[pop], name='R'))
+            self.R_inv.append(tf.divide(1.0, self.R[pop] + 1e-6, name='R_inv'))
 
     def _sample_yz(self):
         """
@@ -290,6 +359,11 @@ class NetFLDS(GenerativeModel):
         self.num_samples_ph = tf.placeholder(
             dtype=tf.int32, shape=None, name='num_samples_ph')
 
+        self._sample_z()
+        self._sample_y()
+
+    def _sample_z(self):
+
         self.latent_rand_samples = tf.random_normal(
             shape=[self.num_samples_ph,
                    self.num_time_pts,
@@ -298,19 +372,16 @@ class NetFLDS(GenerativeModel):
 
         # get random samples from latent space
         def lds_update(outputs, inputs):
-
             z_val = outputs
             rand_z = inputs
-
             z_val = tf.matmul(z_val, tf.transpose(self.A)) \
-                    + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
-
+                + tf.matmul(rand_z, tf.transpose(self.Q_sqrt))
             return z_val
 
         # calculate samples for first time point
         z0_samples = self.z0_mean \
-                     + tf.matmul(self.latent_rand_samples[:, 0, :],
-                                 tf.transpose(self.Q0_sqrt))
+            + tf.matmul(self.latent_rand_samples[:, 0, :],
+                        tf.transpose(self.Q0_sqrt))
 
         # scan over time points, not samples
         rand_ph_shuff = tf.transpose(
@@ -325,17 +396,35 @@ class NetFLDS(GenerativeModel):
             [tf.expand_dims(z0_samples, axis=1),
              tf.transpose(z_samples, perm=[1, 0, 2])], axis=1)
 
+    def _sample_y(self):
+
         # expand dims to account for time and mc dims when applying mapping
         # now (1 x num_samples x num_time_pts x dim_latent)
         z_samples_ex = tf.expand_dims(self.z_samples_prior, axis=0)
 
+        y_means_ls = []  # contribution from latent space
+        y_means_lp = []  # contribution from linear predictors
         y_means = []
         for pop, pop_dim in enumerate(self.dim_obs):
-            y_means.append(tf.squeeze(self.networks[pop].apply_network(
+            y_means_ls.append(tf.squeeze(self.networks[pop].apply_network(
                 z_samples_ex[:, :, :,
                 self.latent_indxs[pop][0]:
                 self.latent_indxs[pop][-1]]),
                 axis=0))
+            if self.dim_predictors is not None:
+                # append new list for this population
+                y_means_lp.append([])
+                for pred, pred_dim in enumerate(self.dim_predictors):
+                    if self.predictor_indx[pop][pred] is not None:
+                        net_out = self.networks_linear[pop][pred]. \
+                            apply_network(self.linear_predictors_phs[pred])
+                        y_means_lp[-1].append(net_out)
+                    # else:
+                    #     self.y_pred_lp[-1].append(0.0)
+                y_means.append(
+                    tf.add(y_means_ls[-1], tf.add_n(y_means_lp[-1])))
+            else:
+                y_means.append(y_means_ls[-1])
 
         # get random samples from observation space
         if self.noise_dist is 'gaussian':
@@ -454,7 +543,7 @@ class NetFLDS(GenerativeModel):
 
         return log_density_z
 
-    def sample(self, sess, num_samples=1, seed=None):
+    def sample(self, sess, num_samples=1, seed=None, linear_predictors=None):
         """
         Generate samples from the model
 
@@ -462,11 +551,12 @@ class NetFLDS(GenerativeModel):
             sess (tf.Session object)
             num_samples (int, optional)
             seed (int, optional)
+            linear_predictors (list)
 
         Returns:
-            num_time_pts x dim_obs x num_samples numpy array:
+            num_samples x num_time_pts x dim_obs x numpy array:
                 sample observations y
-            num_time_pts x dim_latent x num_samples numpy array:
+            num_samples x num_time_pts x dim_latent numpy array:
                 sample latent states z
 
         """
@@ -474,9 +564,17 @@ class NetFLDS(GenerativeModel):
         if seed is not None:
             tf.set_random_seed(seed)
 
+        if self.dim_predictors is not None and linear_predictors is None:
+            raise ValueError('must supply linear predictors for sampling')
+
+        feed_dict = {self.num_samples_ph: num_samples}
+        if self.dim_predictors is not None:
+            for pred, pred_ph in enumerate(self.linear_predictors_phs):
+                feed_dict[pred_ph] = linear_predictors[pred]
+
         [y, z] = sess.run(
             [self.y_samples_prior, self.z_samples_prior],
-            feed_dict={self.num_samples_ph: num_samples})
+            feed_dict=feed_dict)
 
         return y, z
 
@@ -502,6 +600,22 @@ class NetFLDS(GenerativeModel):
 
         return param_dict
 
+    def get_linear_params(self, sess):
+        """Get parameters of linear regressors"""
+
+        param_dict = []
+        for pop, pop_dim in enumerate(self.dim_obs):
+            param_dict.append([])
+            for pred, pred_dim in enumerate(self.dim_predictors):
+                if self.predictor_indx[pop][pred] is not None:
+                    layer_weights_ = sess.run(
+                        self.networks_linear[pop][pred].layers[0].weights)
+                else:
+                    layer_weights_ = []
+                param_dict[pop].append(layer_weights_)
+
+        return param_dict
+
 
 class NetLDS(NetFLDS):
     """
@@ -514,20 +628,27 @@ class NetLDS(NetFLDS):
     """
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
+            self, dim_obs=None, dim_latent=None, linear_predictors=None,
+            num_time_pts=None, gen_params=None, noise_dist='gaussian',
+            post_z_samples=None, **kwargs):
         """
         Args:
             dim_obs (list): observation dimension for each population
             dim_latent (list): latent dimension for each population
-            post_z_samples (batch_size x num_mc_samples x num_time_pts x
-                dim_latent tf.Tensor): samples from the (appx) posterior of the
-                latent states
+            linear_predictors (dict):
+                'dim_predictors' (list): dimension for each set of linear
+                    predictors
+                'predictor_indx' (list of lists): each element of the list
+                    contains the indices of the predictors in the
+                    `dim_predictors` list used by the corresponding population
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
                 model
             noise_dist (str): 'gaussian' | 'poisson'
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
 
         """
 
@@ -563,9 +684,10 @@ class NetLDS(NetFLDS):
                 'bias_regularizer': None}]
 
         super().__init__(
-            dim_obs=dim_obs, dim_latent=dim_latent,
+            dim_obs=dim_obs, dim_latent=dim_latent, nn_params=nn_params,
+            linear_predictors=linear_predictors, noise_dist=noise_dist,
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
-            gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
+            gen_params=gen_params)
 
     def get_params(self, sess):
         """Get parameters of generative model"""
@@ -590,16 +712,14 @@ class FLDS(NetFLDS):
     """
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
+            self, dim_obs=None, dim_latent=None, dim_predictors=None,
             num_time_pts=None, gen_params=None, noise_dist='gaussian',
-            nn_params=None):
+            nn_params=None, post_z_samples=None, **kwargs):
         """
         Args:
             dim_obs (int): observation dimension
             dim_latent (int): latent dimension
-            post_z_samples (batch_size x num_mc_samples x num_time_pts x
-                dim_latent tf.Tensor): samples from the (appx) posterior of the
-                latent states
+            dim_predictors (list): dimension for each set of linear  predictors
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
@@ -608,16 +728,27 @@ class FLDS(NetFLDS):
             nn_params (list): dictionaries for building each layer of the
                 mapping from the latent space to observations; the same
                 network architecture is used for each population
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
 
         """
 
+        if dim_predictors is not None:
+            linear_predictors = {
+                'dim_predictors': dim_predictors,
+                'predictor_indx': [range(len(dim_predictors))]}
+        else:
+            linear_predictors = None
+
         super().__init__(
             dim_obs=[dim_obs], dim_latent=[dim_latent],
+            linear_predictors=linear_predictors,
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
             gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
 
-    def sample(self, sess, num_samples=1, seed=None):
-        y, z = super().sample(sess, num_samples, seed)
+    def sample(self, sess, num_samples=1, seed=None, linear_predictors=None):
+        y, z = super().sample(sess, num_samples, seed, linear_predictors)
         return y[0], z
 
 
@@ -629,20 +760,22 @@ class LDS(NetFLDS):
     """
 
     def __init__(
-            self, dim_obs=None, dim_latent=None, post_z_samples=None,
-            num_time_pts=None, gen_params=None, noise_dist='gaussian'):
+            self, dim_obs=None, dim_latent=None, dim_predictors=None,
+            num_time_pts=None, gen_params=None, noise_dist='gaussian',
+            post_z_samples=None, **kwargs):
         """
         Args:
             dim_obs (int): observation dimension
             dim_latent (int): latent dimension
-            post_z_samples (batch_size x num_mc_samples x num_time_pts x
-                dim_latent tf.Tensor): samples from the (appx) posterior of the
-                latent states
+            dim_predictors (list): dimension for each set of linear predictors
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
                 model
             noise_dist (str): 'gaussian' | 'poisson'
+            post_z_samples (batch_size x num_mc_samples x num_time_pts x
+                dim_latent tf.Tensor): samples from the (appx) posterior of the
+                latent states
 
         """
 
@@ -672,13 +805,21 @@ class LDS(NetFLDS):
             'kernel_regularizer': None,
             'bias_regularizer': None}]
 
+        if dim_predictors is not None:
+            linear_predictors = {
+                'dim_predictors': dim_predictors,
+                'predictor_indx': [range(len(dim_predictors))]}
+        else:
+            linear_predictors = None
+
         super().__init__(
             dim_obs=[dim_obs], dim_latent=[dim_latent],
+            linear_predictors=linear_predictors,
             post_z_samples=post_z_samples, num_time_pts=num_time_pts,
             gen_params=gen_params, nn_params=nn_params, noise_dist=noise_dist)
 
-    def sample(self, sess, num_samples=1, seed=None):
-        y, z = super().sample(sess, num_samples, seed)
+    def sample(self, sess, num_samples=1, seed=None, linear_predictors=None):
+        y, z = super().sample(sess, num_samples, seed, linear_predictors)
         return y[0], z
 
     def get_params(self, sess):

@@ -10,8 +10,8 @@ DTYPE = np.float32
 
 
 def build_model(
-        num_time_pts, dim_obs, dim_latent, num_layers=0, np_seed=0, tf_seed=0,
-        obs_noise='gaussian'):
+        num_time_pts, dim_obs, dim_latent, dim_lps=None, num_layers=0,
+        np_seed=0, tf_seed=0, obs_noise='gaussian'):
     """
     Build netlds model to simulate data
 
@@ -19,6 +19,7 @@ def build_model(
         num_time_pts (int): number of time points per trial
         dim_obs (int): number of observation dimensions
         dim_latent (int): number of latent space dimensions
+        dim_lps (list of ints): dimension of each (optional) linear predictor
         num_layers (int): number of nn layers between latent space and
             observations
         np_seed (int, optional): numpy rng seed
@@ -88,10 +89,11 @@ def build_model(
     gen_model_params = {
         'dim_obs': dim_obs,
         'dim_latent': dim_latent,
+        'dim_predictors': dim_lps,
         'num_time_pts': num_time_pts,
+        'gen_params': gen_params,
         'noise_dist': obs_noise,
-        'nn_params': nn_params,
-        'gen_params': gen_params}
+        'nn_params': nn_params}
 
     # initialize model
     model = LDSModel(

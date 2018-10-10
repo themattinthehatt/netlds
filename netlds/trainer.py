@@ -37,7 +37,7 @@ class Trainer(object):
         self.use_gpu = True
 
         # logging info
-        self.epochs_display = 0
+        self.epochs_display = None
         self.epochs_ckpt = None
         self.checkpoints_dir = None
         self.epochs_summary = None
@@ -53,17 +53,20 @@ class Trainer(object):
                 model.objective)
 
     def train(
-            self, model, observations=None, input_data=None, indxs=None,
-            opt_params=None, output_dir=None, checkpoint_file=None):
+            self, model, data, indxs=None, opt_params=None, output_dir=None,
+            checkpoint_file=None):
         """
         Model training function
 
         Args:
             model (Model object): model to train
-            observations (num_reps x num_time_pts x dim_obs numpy array)
-            input_data (num_reps x num_time_pts x dim_input numpy array,
-                optional): input to inference network; if using observations,
-                leave as `None`.
+            data (dict)
+                'observations' (num_reps x num_time_pts x dim_obs numpy array)
+                'inf_input' (num_reps x num_time_pts x dim_input numpy array,
+                    optional): input to inference network; if using
+                    observations as input, leave as `None`.
+                'linear_predictors' (list): each entry is a
+                    num_reps x num_time_pts x dim_lin_pred numpy array
             indxs (dict, optional): numpy arrays of indices
                 'train', 'test', 'validation'; 'test' indices are used for
                 early stopping if enabled
@@ -95,8 +98,16 @@ class Trainer(object):
 
         if indxs is None:
             indxs = {
-                'train': np.arange(observations.shape[0]),
+                'train': np.arange(data['observations'].shape[0]),
                 'test': None, 'validation': None}
+
+        # Check user-supplied data
+        if 'observations' not in data:
+            ValueError('must supply observation data')
+        if 'inf_input' not in data:
+            ValueError('must supply input to inference network')
+        if 'linear_predictors' not in data:
+            data['linear_predictors'] = []
 
         # Check values entered
         if self.epochs_ckpt is not None and output_dir is None:
@@ -163,16 +174,9 @@ class Trainer(object):
                 model.restore_model(sess, checkpoint_file=checkpoint_file)
 
             # start/resume training
-            self._train_loop(
-                model=model,
-                sess=sess,
-                indxs=indxs,
-                input_data=input_data,
-                observations=observations)
+            self._train_loop(model=model, data=data, sess=sess, indxs=indxs)
 
-    def _train_loop(
-            self, model, sess=None, indxs=None, observations=None,
-            input_data=None):
+    def _train_loop(self, model, data=None, sess=None, indxs=None):
         """Training function for adam optimizer to clean up code in `train`"""
 
         if self.run_diagnostics:
@@ -213,10 +217,7 @@ class Trainer(object):
 
                 # one step of optimization routine
                 feed_dict = self._get_feed_dict(
-                    model=model,
-                    observations=observations,
-                    input_data=input_data,
-                    batch_indxs=batch_indxs)
+                    model=model, data=data, batch_indxs=batch_indxs)
 
                 sess.run(model.train_step, feed_dict=feed_dict)
             epoch_time = time.time() - start
@@ -225,8 +226,7 @@ class Trainer(object):
             if self.epochs_display is not None and (
                     epoch % self.epochs_display == self.epochs_display - 1
                     or epoch == 0):
-                self._train_print_updates(
-                    sess, model, observations, input_data, indxs, epoch_time)
+                self._train_print_updates(sess, model, data, indxs, epoch_time)
 
             # save model checkpoints
             if self.epochs_ckpt is not None and (
@@ -244,13 +244,11 @@ class Trainer(object):
                     epoch % self.epochs_summary == self.epochs_summary - 1
                     or epoch == 0):
                 self._train_save_summaries(
-                    sess, model, observations, input_data, indxs, run_options,
-                    run_metadata)
+                    sess, model, data, indxs, run_options, run_metadata)
 
             # perform early stopping
             if self.early_stop > 0:
-                self._train_early_stop(
-                    sess, model, observations, input_data, indxs)
+                self._train_early_stop(sess, model, data, indxs)
                 if self.early_stop_params['stop_training']:
                     break
 
@@ -264,24 +262,16 @@ class Trainer(object):
             model.checkpoint = checkpoint_file
 
     def _train_print_updates(
-            self, sess, model, observations, input_data, indxs, epoch_time):
+            self, sess, model, data, indxs, epoch_time):
 
         # cost_train = self._get_cost(
-        #     sess=sess,
-        #     model=model,
-        #     observations=observations,
-        #     input_data=input_data,
-        #     indxs=train_indxs)
+        #     sess=sess, model=model, data=data, indxs=train_indxs)
         # cost_train /= len(train_indxs)
         cost_train = np.nan
 
         if indxs['test'] is not None:
             cost_test = self._get_cost(
-                sess=sess,
-                model=model,
-                observations=observations,
-                input_data=input_data,
-                indxs=indxs['test'])
+                sess=sess, model=model, data=data, indxs=indxs['test'])
             cost_test /= len(indxs['test'])
         else:
             cost_test = np.nan
@@ -294,8 +284,7 @@ class Trainer(object):
         # print('epoch %04d (%4.2f s)' % (epoch, epoch_time))
 
     def _train_save_summaries(
-            self, sess, model, observations, input_data, indxs, run_options,
-            run_metadata):
+            self, sess, model, data, indxs, run_options, run_metadata):
 
         # evaluate summaries on all indices
         for _, data_type in enumerate(self._data_types):
@@ -303,10 +292,7 @@ class Trainer(object):
             if self.writers[data_type] is not None:
 
                 feed_dict = self._get_feed_dict(
-                    model=model,
-                    observations=observations,
-                    input_data=input_data,
-                    batch_indxs=indxs[data_type])
+                    model=model, data=data, batch_indxs=indxs[data_type])
 
                 summary = sess.run(
                     model.merge_summaries,
@@ -320,18 +306,13 @@ class Trainer(object):
                 self.writers[data_type].add_summary(summary, self.epoch)
                 self.writers[data_type].flush()
 
-    def _train_early_stop(
-            self, model, sess, observations, input_data, indxs):
+    def _train_early_stop(self, model, sess, data, indxs):
 
         # if you want to suppress that useless warning
         # with warnings.catch_warnings():
         #     warnings.simplefilter('ignore', category=RuntimeWarning)
         cost_test = self._get_cost(
-            sess=sess,
-            model=model,
-            observations=observations,
-            input_data=input_data,
-            indxs=indxs['test'])
+            sess=sess, model=model, data=data, indxs=indxs['test'])
 
         # unpack param dict
         prev_costs = self.early_stop_params['prev_costs']
@@ -391,7 +372,7 @@ class Trainer(object):
         self.early_stop_params['best_cost'] = best_cost
         self.early_stop_params['chkpted'] = chkpted
 
-    def _get_cost(self, sess, model, observations, input_data, indxs):
+    def _get_cost(self, sess, model, data, indxs):
         """Utility function to clean up code in training functions"""
 
         batch_size = 16  # fix for now
@@ -403,10 +384,7 @@ class Trainer(object):
             # get training indices for this batch
             batch_indxs = indxs[batch * batch_size: (batch + 1) * batch_size]
             feed_dict = self._get_feed_dict(
-                model=model,
-                observations=observations,
-                input_data=input_data,
-                batch_indxs=batch_indxs)
+                model=model, data=data, batch_indxs=batch_indxs)
             cost += sess.run(model.objective, feed_dict=feed_dict) * len(
                 batch_indxs)
 
@@ -414,29 +392,30 @@ class Trainer(object):
         if num_batches * batch_size < len(indxs):
             batch_indxs = indxs[(batch + 1) * batch_size + 1: -1]
             feed_dict = self._get_feed_dict(
-                model=model,
-                observations=observations,
-                input_data=input_data,
-                batch_indxs=batch_indxs)
+                model=model, data=data, batch_indxs=batch_indxs)
             cost += sess.run(model.objective, feed_dict=feed_dict) * len(
                 batch_indxs)
 
         return cost / len(indxs)
 
-    def _get_feed_dict(
-            self, model, observations=None, input_data=None, batch_indxs=None):
+    def _get_feed_dict(self, model, data=None, batch_indxs=None):
         """Generates feed dict for training and other evaluation functions"""
 
         if batch_indxs is not None:
             feed_dict = {
                 model.gen_net.outputs_ph:
-                    observations[batch_indxs, :, :],
+                    data['observations'][batch_indxs, :, :],
                 model.inf_net.input_ph:
-                    input_data[batch_indxs, :, :]}
+                    data['inf_input'][batch_indxs, :, :]}
+            for indx_, data_ in enumerate(data['linear_predictors']):
+                feed_dict[model.gen_net.linear_predictors_phs[indx_]] = \
+                    data_[batch_indxs, :, :]
         else:
             feed_dict = {
-                model.gen_net.outputs_ph: observations,
-                model.inf_net.input_ph: input_data}
+                model.gen_net.outputs_ph: data['observations'],
+                model.inf_net.input_ph: data['input_data']}
+            for indx_, data_ in enumerate(data['linear_predictors']):
+                feed_dict[model.gen_net.linear_predictors_phs[indx_]] = data_
 
         return feed_dict
 
