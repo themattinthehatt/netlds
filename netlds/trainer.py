@@ -53,8 +53,8 @@ class Trainer(object):
                 model.objective)
 
     def train(
-            self, model, data, indxs=None, opt_params=None, output_dir=None,
-            checkpoint_file=None):
+            self, model=None, data=None, indxs=None, opt_params=None,
+            output_dir=None, checkpoint_file=None):
         """
         Model training function
 
@@ -84,6 +84,8 @@ class Trainer(object):
                 stored in model.checkpoint is used
 
         Raises:
+            ValueError: If data dict does not contain observations
+            ValueError: If data dict does not contain inference network input
             ValueError: If `epochs_ckpt` value is not `None` and `output_dir`
                 is `None`
             ValueError: If `epochs_summary` is not `None` and `output_dir` is
@@ -100,12 +102,16 @@ class Trainer(object):
             indxs = {
                 'train': np.arange(data['observations'].shape[0]),
                 'test': None, 'validation': None}
+        if 'test' not in indxs:
+            indxs['test'] = None
+        if 'validation' not in indxs:
+            indxs['validation'] = None
 
         # Check user-supplied data
         if 'observations' not in data:
-            ValueError('must supply observation data')
+            raise ValueError('must supply observation data')
         if 'inf_input' not in data:
-            ValueError('must supply input to inference network')
+            raise ValueError('must supply input to inference network')
         if 'linear_predictors' not in data:
             data['linear_predictors'] = []
 

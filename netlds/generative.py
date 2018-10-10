@@ -129,14 +129,14 @@ class NetFLDS(GenerativeModel):
 
         # networks mapping linear predictors to obs for each population
         # accessed as self.networks_linear[pop][pred]
-        self.networks_linear = [
-            [None for _ in range(len(self.dim_predictors))]
-            for _ in range(len(dim_obs))]
-        self.predictor_indx = [
-            [None for _ in range(len(self.dim_predictors))]
-            for _ in range(len(dim_obs))]
         # only initialize networks if we have linear predictors
         if self.dim_predictors is not None:
+            self.networks_linear = [
+                [None for _ in range(len(self.dim_predictors))]
+                for _ in range(len(dim_obs))]
+            self.predictor_indx = [
+                [None for _ in range(len(self.dim_predictors))]
+                for _ in range(len(dim_obs))]
             linear_nn_params = [{'activation': 'linear'}]
             for pop, pop_dim in enumerate(self.dim_obs):
                 # for pred, pred_dim in enumerate(self.dim_predictors):
@@ -154,6 +154,9 @@ class NetFLDS(GenerativeModel):
                         pred_params = linear_nn_params
                     self.networks_linear[pop][pred_indx] = Network(
                         output_dim=pop_dim, nn_params=pred_params)
+        else:
+            self.networks_linear = None
+            self.predictor_indx = None
 
         # initialize lists for other relevant variables
         self.linear_predictors_phs = []
