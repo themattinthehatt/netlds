@@ -11,6 +11,9 @@ from netlds.trainer import Trainer
 class Model(object):
     """Base class for models"""
 
+    # use same data type throughout graph construction
+    dtype = tf.float32
+
     def __init__(
             self, inf_network=None, inf_network_params=None, gen_model=None,
             gen_model_params=None, np_seed=0, tf_seed=0):
@@ -351,6 +354,9 @@ class DynamicalModel(Model):
         self.dim_latent = self.gen_net.dim_latent
         self.num_time_pts = self.gen_net.num_time_pts
 
+        # observations
+        self.y_true = []
+
     def build_graph(self):
         """Build tensorflow computation graph for model"""
         raise NotImplementedError
@@ -365,7 +371,7 @@ class DynamicalModel(Model):
         # expected value of log joint distribution
         with tf.variable_scope('log_joint'):
             self.log_joint = self.gen_net.log_density(
-                self.gen_net.y_pred, self.inf_net.post_z_samples)
+                self.y_true, self.inf_net.post_z_samples)
 
         # entropy of approximate posterior
         with tf.variable_scope('entropy'):
@@ -520,6 +526,8 @@ class LDSModel(DynamicalModel):
         self.constructor_inputs['model_class'] = LDSModel
         self.constructor_inputs['couple_params'] = couple_params
 
+        self.obs_indxs = []
+
     def build_graph(self, opt_params=None):
         """Build tensorflow computation graph for model"""
 
@@ -530,6 +538,27 @@ class LDSModel(DynamicalModel):
 
             # set random seed for this graph
             tf.set_random_seed(self.tf_seed)
+
+            # construct data pipeline - assume that all data comes in as a
+            # large block, and slice up tensor here to correspond to data from
+            # distinct populations
+            # NOTE: requires that `dim_obs` input to generative model
+            # constructor is in same order as the data
+            with tf.variable_scope('observations'):
+                # one placeholder for all data
+                self.y_true_ph = tf.placeholder(
+                    dtype=self.dtype,
+                    shape=[None, self.num_time_pts, sum(self.dim_obs)],
+                    name='outputs_ph')
+                # carve up placeholder into distinct populations
+                indx_start = 0
+                for pop, pop_dim in enumerate(self.dim_obs):
+                    indx_end = indx_start + pop_dim
+                    self.obs_indxs.append(
+                        np.arange(indx_start, indx_end + 1, dtype=np.int32))
+                    self.y_true.append(
+                        self.y_true_ph[:, :, indx_start:indx_end])
+                    indx_start = indx_end
 
             if self.couple_params:
 

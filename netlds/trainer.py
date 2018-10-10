@@ -403,7 +403,7 @@ class Trainer(object):
 
         if batch_indxs is not None:
             feed_dict = {
-                model.gen_net.outputs_ph:
+                model.y_true_ph:
                     data['observations'][batch_indxs, :, :],
                 model.inf_net.input_ph:
                     data['inf_input'][batch_indxs, :, :]}
@@ -412,7 +412,7 @@ class Trainer(object):
                     data_[batch_indxs, :, :]
         else:
             feed_dict = {
-                model.gen_net.outputs_ph: data['observations'],
+                model.y_true_ph: data['observations'],
                 model.inf_net.input_ph: data['input_data']}
             for indx_, data_ in enumerate(data['linear_predictors']):
                 feed_dict[model.gen_net.linear_predictors_phs[indx_]] = data_

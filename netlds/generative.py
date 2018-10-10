@@ -138,13 +138,11 @@ class NetFLDS(GenerativeModel):
                         self.predictor_indx[pop][pred] = pred
 
         # initialize lists for other relevant variables
-        self.outputs = []
         self.linear_predictors_phs = []
         self.y_pred = []
         self.y_pred_ls = []  # latent space
         self.y_pred_lp = []  # linear predictors
         self.y_samples_prior = []
-        self.obs_indxs = []
         self.latent_indxs = []
         if noise_dist is 'gaussian':
             self.R_sqrt = []
@@ -171,27 +169,6 @@ class NetFLDS(GenerativeModel):
         self.Q = param_dict['Q']
         self.Q0_inv = param_dict['Q0_inv']
         self.Q_inv = param_dict['Q_inv']
-
-        # construct data pipeline - assume that all data comes in as a large
-        # block, and slice up tensor here to correspond to data from distinct
-        # populations
-        # NOTE: requires that `dim_obs` input to constructor is in same order
-        # as the data
-        with tf.variable_scope('observations'):
-            # one placeholder for all data
-            self.outputs_ph = tf.placeholder(
-                dtype=self.dtype,
-                shape=[None, self.num_time_pts, sum(self.dim_obs)],
-                name='outputs_ph')
-            # carve up placeholder into distinct populations
-            indx_start = 0
-            for pop, pop_dim in enumerate(self.dim_obs):
-                indx_end = indx_start + pop_dim
-                self.obs_indxs.append(
-                    np.arange(indx_start, indx_end + 1, dtype=np.int32))
-                self.outputs.append(
-                    self.outputs_ph[:, :, indx_start:indx_end])
-                indx_start = indx_end
 
         # initialize placeholders for linear predictors
         with tf.variable_scope('linear_predictors'):
@@ -480,7 +457,7 @@ class NetFLDS(GenerativeModel):
 
                 if self.noise_dist is 'gaussian':
                     # expand observation dims over mc samples
-                    res_y = tf.expand_dims(self.outputs[pop], axis=1) - y[pop]
+                    res_y = tf.expand_dims(y[pop], axis=1) - self.y_pred[pop]
 
                     # average over batch and mc sample dimensions
                     res_y_R_inv_res_y = tf.reduce_mean(
@@ -499,11 +476,12 @@ class NetFLDS(GenerativeModel):
 
                 elif self.noise_dist is 'poisson':
                     # expand observation dims over mc samples
-                    obs_y = tf.expand_dims(self.outputs[pop], axis=1)
+                    obs_y = tf.expand_dims(y[pop], axis=1)
 
                     # average over batch and mc sample dimensions
                     log_density_ya = tf.reduce_mean(
-                        tf.multiply(obs_y[pop], tf.log(y[pop])) - y[pop]
+                        tf.multiply(obs_y[pop], tf.log(self.y_pred[pop]))
+                        - self.y_pred[pop]
                         - tf.lgamma(1 + obs_y[pop]),
                         axis=[0, 1])
 
