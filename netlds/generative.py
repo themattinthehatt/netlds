@@ -70,6 +70,9 @@ class NetFLDS(GenerativeModel):
                 'predictor_indx' (list of lists): each element of the list
                     contains the indices of the predictors in the
                     `dim_predictors` list used by the corresponding population
+                'predictor_params' (list of lists): each element contains
+                    params for initializing the linear mapping of each pop/pred
+                    combo; should match 'predictor_indx'
             num_time_pts (int): number of time points per observation of the
                 dynamical sequence
             gen_params (dict): dictionary of generative params for initializing
@@ -93,6 +96,10 @@ class NetFLDS(GenerativeModel):
         else:
             self.dim_predictors = linear_predictors['dim_predictors']
             predictor_indx = linear_predictors['predictor_indx']
+            if 'predictor_params' in linear_predictors:
+                predictor_params = linear_predictors['predictor_params']
+            else:
+                predictor_params = None
 
         self.num_time_pts = num_time_pts
         if gen_params is None:
@@ -122,20 +129,31 @@ class NetFLDS(GenerativeModel):
 
         # networks mapping linear predictors to obs for each population
         # accessed as self.networks_linear[pop][pred]
-        self.networks_linear = [[None for _ in range(len(self.dim_predictors))]
-                                for _ in range(len(dim_obs))]
-        self.predictor_indx = [[None for _ in range(len(self.dim_predictors))]
-                               for _ in range(len(dim_obs))]
+        self.networks_linear = [
+            [None for _ in range(len(self.dim_predictors))]
+            for _ in range(len(dim_obs))]
+        self.predictor_indx = [
+            [None for _ in range(len(self.dim_predictors))]
+            for _ in range(len(dim_obs))]
         # only initialize networks if we have linear predictors
         if self.dim_predictors is not None:
             linear_nn_params = [{'activation': 'linear'}]
             for pop, pop_dim in enumerate(self.dim_obs):
-                for pred, pred_dim in enumerate(self.dim_predictors):
-                    if any(pred_indx == pred
-                           for pred_indx in predictor_indx[pop]):
-                        self.networks_linear[pop][pred] = Network(
-                            output_dim=pop_dim, nn_params=linear_nn_params)
-                        self.predictor_indx[pop][pred] = pred
+                # for pred, pred_dim in enumerate(self.dim_predictors):
+                #     if any(pred_indx == pred
+                #            for pred_indx in predictor_indx[pop]):
+                #         self.networks_linear[pop][pred] = Network(
+                #             output_dim=pop_dim, nn_params=linear_nn_params)
+                #         self.predictor_indx[pop][pred] = pred
+                for indx, pred_indx in enumerate(predictor_indx[pop]):
+                    self.predictor_indx[pop][pred_indx] = pred_indx
+                    if predictor_params is not None \
+                            and predictor_params[pop][indx] is not None:
+                        pred_params = predictor_params[pop][indx]
+                    else:
+                        pred_params = linear_nn_params
+                    self.networks_linear[pop][pred_indx] = Network(
+                        output_dim=pop_dim, nn_params=pred_params)
 
         # initialize lists for other relevant variables
         self.linear_predictors_phs = []
@@ -716,6 +734,9 @@ class FLDS(NetFLDS):
             linear_predictors = {
                 'dim_predictors': dim_predictors,
                 'predictor_indx': [range(len(dim_predictors))]}
+            if 'predictor_params' in kwargs:
+                linear_predictors['predictor_params'] = \
+                    [kwargs['predictor_params']]
         else:
             linear_predictors = None
 
@@ -787,6 +808,9 @@ class LDS(NetFLDS):
             linear_predictors = {
                 'dim_predictors': dim_predictors,
                 'predictor_indx': [range(len(dim_predictors))]}
+            if 'predictor_params' in kwargs:
+                linear_predictors['predictor_params'] = \
+                    [kwargs['predictor_params']]
         else:
             linear_predictors = None
 
