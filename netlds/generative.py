@@ -159,7 +159,6 @@ class NetFLDS(GenerativeModel):
             self.predictor_indx = None
 
         # initialize lists for other relevant variables
-        self.linear_predictors_phs = []
         self.y_pred = []
         self.y_pred_ls = []  # latent space
         self.y_pred_lp = []  # linear predictors
@@ -170,13 +169,14 @@ class NetFLDS(GenerativeModel):
             self.R = []
             self.R_inv = []
 
-    def build_graph(self, z_samples, param_dict):
+    def build_graph(self, z_samples, lin_preds, param_dict):
         """
         Build tensorflow computation graph for generative model
 
         Args:
             z_samples (batch_size x num_mc_samples x num_time_pts x dim_latent
                 tf.Tensor): samples of the latent states
+            lin_preds (list):
             param_dict (dict): output of NetLDS.initialize_prior_vars() method
 
         """
@@ -191,16 +191,8 @@ class NetFLDS(GenerativeModel):
         self.Q0_inv = param_dict['Q0_inv']
         self.Q_inv = param_dict['Q_inv']
 
-        # initialize placeholders for linear predictors
-        with tf.variable_scope('linear_predictors'):
-            if self.dim_predictors is not None:
-                for pred, dim_pred in enumerate(self.dim_predictors):
-                    self.linear_predictors_phs.append(
-                        tf.placeholder(
-                            dtype=self.dtype,
-                            shape=[None, self.num_time_pts, dim_pred],
-                            name='linear_pred_ph_%02i' % pred))
-
+        self.lin_predictors = lin_preds
+        
         # keep track of which latent states belong to each population
         indx_start = 0
         for pop, pop_dim_latent in enumerate(self.dim_latent):
@@ -224,7 +216,7 @@ class NetFLDS(GenerativeModel):
                                 self.networks_linear[pop][pred].build_graph()
                                 net_out = self.networks_linear[pop][pred].\
                                     apply_network(
-                                        self.linear_predictors_phs[pred])
+                                        self.lin_predictors[pred])
                                 # expand network output to match dims of
                                 # samples from latent space:
                                 # batch x num_samps x num_time_pts x dim_latent
@@ -415,7 +407,7 @@ class NetFLDS(GenerativeModel):
                 for pred, pred_dim in enumerate(self.dim_predictors):
                     if self.predictor_indx[pop][pred] is not None:
                         net_out = self.networks_linear[pop][pred]. \
-                            apply_network(self.linear_predictors_phs[pred])
+                            apply_network(self.lin_predictors[pred])
                         y_means_lp[-1].append(net_out)
                     # else:
                     #     self.y_pred_lp[-1].append(0.0)
@@ -568,7 +560,7 @@ class NetFLDS(GenerativeModel):
 
         feed_dict = {self.num_samples_ph: num_samples}
         if self.dim_predictors is not None:
-            for pred, pred_ph in enumerate(self.linear_predictors_phs):
+            for pred, pred_ph in enumerate(self.lin_predictors):
                 feed_dict[pred_ph] = linear_predictors[pred]
 
         [y, z] = sess.run(

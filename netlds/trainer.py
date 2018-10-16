@@ -9,6 +9,9 @@ import copy
 
 class Trainer(object):
 
+    # use same data type throughout graph construction
+    dtype = tf.float32
+
     _optimizer_ops = {
         'adam': tf.train.AdamOptimizer,
         'adagrad': tf.train.AdagradOptimizer,
@@ -45,12 +48,41 @@ class Trainer(object):
         self.writers = {'train': None, 'test': None, 'validation': None}
         self.run_diagnostics = False
 
-    def _define_optimizer_op(self, model):
+    def _build_optimizer(self, model):
         """Define one step of the optimization routine"""
 
         model.train_step = \
             self.optimizer(**self.opt_params[self.learning_alg]).minimize(
                 model.objective)
+
+    def _build_data_pipeline(
+            self, num_time_pts, dim_obs, dim_input, dim_predictors):
+
+        # one placeholder for all data
+        with tf.variable_scope('observations_input'):
+            self.y_true_ph = tf.placeholder(
+                dtype=self.dtype,
+                shape=[None, num_time_pts, sum(dim_obs)],
+                name='output_ph')
+        with tf.variable_scope('inference_input'):
+            self.input_ph = tf.placeholder(
+                dtype=self.dtype,
+                shape=[None, num_time_pts, dim_input],
+                name='input_ph')
+        with tf.variable_scope('linear_predictors'):
+            if dim_predictors is not None:
+                self.linear_predictors_phs = []
+                for pred, dim_pred in enumerate(dim_predictors):
+                    self.linear_predictors_phs.append(
+                        tf.placeholder(
+                            dtype=self.dtype,
+                            shape=[None, num_time_pts, dim_pred],
+                            name='linear_pred_ph_%02i' % pred))
+
+            else:
+                self.linear_predictors_phs = None
+
+        return self.y_true_ph, self.input_ph, self.linear_predictors_phs
 
     def train(
             self, model=None, data=None, indxs=None, opt_params=None,
@@ -182,6 +214,15 @@ class Trainer(object):
             # start/resume training
             self._train_loop(model=model, data=data, sess=sess, indxs=indxs)
 
+            # perform final checkpoint if not early stopping (handles on own)
+            if self.epochs_ckpt is np.inf and self.early_stop == 0:
+                checkpoint_file = os.path.join(
+                    self.checkpoints_dir, str('epoch_%05g.ckpt' % self.epoch))
+                model.checkpoint_model(
+                    sess, checkpoint_file=checkpoint_file, print_filepath=True)
+                # store most recent checkpoint as model attribute
+                model.checkpoint = checkpoint_file
+
     def _train_loop(self, model, data=None, sess=None, indxs=None):
         """Training function for adam optimizer to clean up code in `train`"""
 
@@ -223,7 +264,7 @@ class Trainer(object):
 
                 # one step of optimization routine
                 feed_dict = self._get_feed_dict(
-                    model=model, data=data, batch_indxs=batch_indxs)
+                    data=data, batch_indxs=batch_indxs)
 
                 sess.run(model.train_step, feed_dict=feed_dict)
             epoch_time = time.time() - start
@@ -258,15 +299,6 @@ class Trainer(object):
                 if self.early_stop_params['stop_training']:
                     break
 
-        # perform final checkpoint if not early stopping (handles case on own)
-        if self.epochs_ckpt is np.inf and self.early_stop == 0:
-            checkpoint_file = os.path.join(
-                self.checkpoints_dir, str('epoch_%05g.ckpt' % self.epoch))
-            model.checkpoint_model(
-                sess, checkpoint_file=checkpoint_file, print_filepath=True)
-            # store most recent checkpoint as model attribute
-            model.checkpoint = checkpoint_file
-
     def _train_print_updates(
             self, sess, model, data, indxs, epoch_time):
 
@@ -298,7 +330,7 @@ class Trainer(object):
             if self.writers[data_type] is not None:
 
                 feed_dict = self._get_feed_dict(
-                    model=model, data=data, batch_indxs=indxs[data_type])
+                    data=data, batch_indxs=indxs[data_type])
 
                 summary = sess.run(
                     model.merge_summaries,
@@ -389,39 +421,35 @@ class Trainer(object):
         for batch in range(num_batches):
             # get training indices for this batch
             batch_indxs = indxs[batch * batch_size: (batch + 1) * batch_size]
-            feed_dict = self._get_feed_dict(
-                model=model, data=data, batch_indxs=batch_indxs)
+            feed_dict = self._get_feed_dict(data=data, batch_indxs=batch_indxs)
             cost += sess.run(model.objective, feed_dict=feed_dict) * len(
                 batch_indxs)
 
         # last partial batch
         if num_batches * batch_size < len(indxs):
             batch_indxs = indxs[(batch + 1) * batch_size + 1: -1]
-            feed_dict = self._get_feed_dict(
-                model=model, data=data, batch_indxs=batch_indxs)
+            feed_dict = self._get_feed_dict(data=data, batch_indxs=batch_indxs)
             cost += sess.run(model.objective, feed_dict=feed_dict) * len(
                 batch_indxs)
 
         return cost / len(indxs)
 
-    def _get_feed_dict(self, model, data=None, batch_indxs=None):
+    def _get_feed_dict(self, data=None, batch_indxs=None):
         """Generates feed dict for training and other evaluation functions"""
 
         if batch_indxs is not None:
             feed_dict = {
-                model.y_true_ph:
-                    data['observations'][batch_indxs, :, :],
-                model.inf_net.input_ph:
-                    data['inf_input'][batch_indxs, :, :]}
+                self.y_true_ph: data['observations'][batch_indxs, :, :],
+                self.input_ph: data['inf_input'][batch_indxs, :, :]}
             for indx_, data_ in enumerate(data['linear_predictors']):
-                feed_dict[model.gen_net.linear_predictors_phs[indx_]] = \
+                feed_dict[self.linear_predictors_phs[indx_]] = \
                     data_[batch_indxs, :, :]
         else:
             feed_dict = {
-                model.y_true_ph: data['observations'],
-                model.inf_net.input_ph: data['input_data']}
+                self.y_true_ph: data['observations'],
+                self.input_ph: data['input_data']}
             for indx_, data_ in enumerate(data['linear_predictors']):
-                feed_dict[model.gen_net.linear_predictors_phs[indx_]] = data_
+                feed_dict[self.linear_predictors_phs[indx_]] = data_
 
         return feed_dict
 

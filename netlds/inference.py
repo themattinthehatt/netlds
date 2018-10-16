@@ -101,7 +101,7 @@ class SmoothingLDS(InferenceNetwork):
             output_dim=self.dim_latent * self.dim_latent,
             nn_params=layer_z_var_params)
 
-    def build_graph(self, param_dict):
+    def build_graph(self, input, param_dict):
         """Build tensorflow computation graph for inference network"""
 
         # set prior variables generated elsewhere
@@ -114,12 +114,8 @@ class SmoothingLDS(InferenceNetwork):
         self.Q0_inv = param_dict['Q0_inv']
         self.Q_inv = param_dict['Q_inv']
 
-        # construct data pipeline
-        with tf.variable_scope('inference_input'):
-            self._initialize_inference_input()
-
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp()
+            self._build_inference_mlp(input)
 
         with tf.variable_scope('precision_matrix'):
             self._build_precision_matrix()
@@ -130,21 +126,15 @@ class SmoothingLDS(InferenceNetwork):
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _initialize_inference_input(self):
+    def _build_inference_mlp(self, input):
 
-        self.input_ph = tf.placeholder(
-            dtype=self.dtype,
-            shape=[None, self.num_time_pts, self.dim_input],
-            name='input_ph')
-
-    def _build_inference_mlp(self):
-
+        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_vars.build_graph()
 
         # compute layer outputs from inference network input
-        self.hidden_act = self.network.apply_network(self.input_ph)
+        self.hidden_act = self.network.apply_network(self.input)
 
         # get data-dependent mean
         self.m_psi = self.layer_z_mean.apply_network(self.hidden_act)
@@ -238,7 +228,7 @@ class SmoothingLDS(InferenceNetwork):
     def _build_posterior_samples(self):
 
         self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
+            shape=[tf.shape(self.input)[0],
                    self.num_time_pts, self.dim_latent, self.num_mc_samples],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
@@ -312,7 +302,7 @@ class SmoothingLDS(InferenceNetwork):
 
         return sess.run(
             self.post_z_samples,
-            feed_dict={self.input_ph: observations})
+            feed_dict={self.input: observations})
 
     def get_params(self, sess):
         """Get parameters of generative model"""
@@ -328,7 +318,7 @@ class SmoothingLDS(InferenceNetwork):
     def get_posterior_means(self, sess, input_data):
         """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: input_data}
+        feed_dict = {self.input: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)
 
@@ -400,31 +390,21 @@ class MeanFieldGaussian(InferenceNetwork):
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
 
-        # construct data pipeline
-        with tf.variable_scope('inference_input'):
-            self._initialize_inference_input()
-
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp()
+            self._build_inference_mlp(args[0])
 
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _initialize_inference_input(self):
+    def _build_inference_mlp(self, input):
 
-        self.input_ph = tf.placeholder(
-            dtype=self.dtype,
-            shape=[None, self.num_time_pts, self.dim_input],
-            name='input_ph')
-
-    def _build_inference_mlp(self):
-
+        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_log_vars.build_graph()
 
         # compute layer outputs from inference network input
-        self.hidden_act = self.network.apply_network(self.input_ph)
+        self.hidden_act = self.network.apply_network(self.input)
 
         # get data-dependent mean
         self.post_z_means = self.layer_z_mean.apply_network(self.hidden_act)
@@ -436,7 +416,7 @@ class MeanFieldGaussian(InferenceNetwork):
     def _build_posterior_samples(self):
 
         self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
+            shape=[tf.shape(self.input)[0],
                    self.num_mc_samples, self.num_time_pts, self.dim_latent],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
@@ -477,12 +457,12 @@ class MeanFieldGaussian(InferenceNetwork):
 
         return sess.run(
             self.post_z_samples,
-            feed_dict={self.input_ph: observations})
+            feed_dict={self.input: observations})
 
     def get_posterior_means(self, sess, input_data):
         """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: input_data}
+        feed_dict = {self.input: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)
 
@@ -552,31 +532,21 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
 
-        # construct data pipeline
-        with tf.variable_scope('inference_input'):
-            self._initialize_inference_input()
-
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp()
+            self._build_inference_mlp(args[0])
 
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _initialize_inference_input(self):
+    def _build_inference_mlp(self, input):
 
-        self.input_ph = tf.placeholder(
-            dtype=self.dtype,
-            shape=[None, self.num_time_pts, self.dim_input],
-            name='input_ph')
-
-    def _build_inference_mlp(self):
-
+        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_vars.build_graph()
 
         # compute layer outputs from inference network input
-        self.hidden_act = self.network.apply_network(self.input_ph)
+        self.hidden_act = self.network.apply_network(self.input)
 
         # get data-dependent mean
         self.post_z_means = self.layer_z_mean.apply_network(self.hidden_act)
@@ -590,7 +560,7 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
     def _build_posterior_samples(self):
 
         self.samples_z = tf.random_normal(
-            shape=[tf.shape(self.input_ph)[0],
+            shape=[tf.shape(self.input)[0],
                    self.num_time_pts, self.dim_latent, self.num_mc_samples],
             mean=0.0, stddev=1.0, dtype=self.dtype, name='samples_z')
 
@@ -678,11 +648,11 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
 
         return sess.run(
             self.post_z_samples,
-            feed_dict={self.input_ph: observations})
+            feed_dict={self.input: observations})
 
     def get_posterior_means(self, sess, input_data):
         """Get posterior means conditioned on inference network input"""
 
-        feed_dict = {self.input_ph: input_data}
+        feed_dict = {self.input: input_data}
 
         return sess.run(self.post_z_means, feed_dict=feed_dict)

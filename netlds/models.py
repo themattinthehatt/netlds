@@ -65,7 +65,7 @@ class Model(object):
         """Build tensorflow computation graph for model"""
         raise NotImplementedError
 
-    def _define_objective(self):
+    def _build_objective(self):
         """Objective function used to optimize model parameters"""
         self.objective = None
         raise NotImplementedError
@@ -353,6 +353,7 @@ class DynamicalModel(Model):
         self.dim_obs = self.gen_net.dim_obs
         self.dim_latent = self.gen_net.dim_latent
         self.num_time_pts = self.gen_net.num_time_pts
+        self.dim_input = self.inf_net.dim_input
 
         # observations
         self.y_true = []
@@ -361,7 +362,7 @@ class DynamicalModel(Model):
         """Build tensorflow computation graph for model"""
         raise NotImplementedError
 
-    def _define_objective(self):
+    def _build_objective(self):
         """
         Objective function used to optimize model parameters
 
@@ -456,16 +457,16 @@ class DynamicalModel(Model):
 
         return posterior_means
 
-    def get_cost(self, observations=None, input_data=None, indxs=None,
-                 checkpoint_file=None):
+    def get_cost(self, data=None, indxs=None, checkpoint_file=None):
         """
         User function for retrieving cost
 
         Args:
-            observations (num_samples x num_time_pts x dim_obs tf.Tensor):
-                observations on which to condition the posterior means
-            input_data (num_samples x num_time_pts x dim_input tf.Tensor,
-                optional)
+            data (dict):
+                observations (num_samples x num_time_pts x dim_obs tf.Tensor):
+                    observations on which to condition the posterior means
+                input_data (num_samples x num_time_pts x dim_input tf.Tensor,
+                    optional)
             indxs (list, optional): list of indices into observations and
                 input_data
             checkpoint_file (str, optional): location of checkpoint file
@@ -479,15 +480,14 @@ class DynamicalModel(Model):
         """
 
         if indxs is None:
-            indxs = list(range(observations.shape[0]))
+            indxs = list(range(data['observations'].shape[0]))
 
         self._check_graph()
 
         with tf.Session(graph=self.graph, config=self.sess_config) as sess:
             self.restore_model(sess, checkpoint_file=checkpoint_file)
             cost = self.trainer._get_cost(
-                sess=sess, observations=observations, input_data=input_data,
-                indxs=indxs)
+                sess=sess, model=self, data=data, indxs=indxs)
 
         return cost
 
@@ -544,12 +544,13 @@ class LDSModel(DynamicalModel):
             # distinct populations
             # NOTE: requires that `dim_obs` input to generative model
             # constructor is in same order as the data
+            with tf.variable_scope('data'):
+                y_true, inf_input, lin_preds = \
+                    self.trainer._build_data_pipeline(
+                        self.num_time_pts, self.dim_obs, self.dim_input,
+                        self.gen_net.dim_predictors)
+
             with tf.variable_scope('observations'):
-                # one placeholder for all data
-                self.y_true_ph = tf.placeholder(
-                    dtype=self.dtype,
-                    shape=[None, self.num_time_pts, sum(self.dim_obs)],
-                    name='outputs_ph')
                 # carve up placeholder into distinct populations
                 indx_start = 0
                 for pop, pop_dim in enumerate(self.dim_obs):
@@ -557,7 +558,7 @@ class LDSModel(DynamicalModel):
                     self.obs_indxs.append(
                         np.arange(indx_start, indx_end + 1, dtype=np.int32))
                     self.y_true.append(
-                        self.y_true_ph[:, :, indx_start:indx_end])
+                        y_true[:, :, indx_start:indx_end])
                     indx_start = indx_end
 
             if self.couple_params:
@@ -566,7 +567,7 @@ class LDSModel(DynamicalModel):
                     param_dict = self.gen_net.initialize_prior_vars()
 
                 with tf.variable_scope('inference_network'):
-                    self.inf_net.build_graph(param_dict)
+                    self.inf_net.build_graph(inf_input, param_dict)
 
                 with tf.variable_scope('generative_model'):
                     self.gen_net.build_graph(
@@ -583,13 +584,13 @@ class LDSModel(DynamicalModel):
                     with tf.variable_scope('model_params'):
                         param_dict = self.gen_net.initialize_prior_vars()
                     self.gen_net.build_graph(
-                        self.inf_net.post_z_samples, param_dict)
+                        self.inf_net.post_z_samples, lin_preds, param_dict)
 
             with tf.variable_scope('objective'):
-                self._define_objective()
+                self._build_objective()
 
             with tf.variable_scope('optimizer'):
-                self.trainer._define_optimizer_op(self)
+                self.trainer._build_optimizer(self)
 
             # add additional ops
             # for saving and restoring models (initialized after var creation)
