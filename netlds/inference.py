@@ -101,7 +101,7 @@ class SmoothingLDS(InferenceNetwork):
             output_dim=self.dim_latent * self.dim_latent,
             nn_params=layer_z_var_params)
 
-    def build_graph(self, input, param_dict):
+    def build_graph(self, inputs, param_dict):
         """Build tensorflow computation graph for inference network"""
 
         # set prior variables generated elsewhere
@@ -113,9 +113,10 @@ class SmoothingLDS(InferenceNetwork):
         self.Q = param_dict['Q']
         self.Q0_inv = param_dict['Q0_inv']
         self.Q_inv = param_dict['Q_inv']
+        self.input = inputs
 
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp(input)
+            self._build_inference_mlp()
 
         with tf.variable_scope('precision_matrix'):
             self._build_precision_matrix()
@@ -126,9 +127,8 @@ class SmoothingLDS(InferenceNetwork):
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _build_inference_mlp(self, input):
+    def _build_inference_mlp(self):
 
-        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_vars.build_graph()
@@ -390,15 +390,16 @@ class MeanFieldGaussian(InferenceNetwork):
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
 
+        self.input = args[0]
+
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp(args[0])
+            self._build_inference_mlp()
 
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _build_inference_mlp(self, input):
+    def _build_inference_mlp(self):
 
-        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_log_vars.build_graph()
@@ -532,15 +533,16 @@ class MeanFieldGaussianTemporal(InferenceNetwork):
     def build_graph(self, *args):
         """Build tensorflow computation graph for inference network"""
 
+        self.input = args[0]
+
         with tf.variable_scope('inference_mlp'):
-            self._build_inference_mlp(args[0])
+            self._build_inference_mlp()
 
         with tf.variable_scope('posterior_samples'):
             self._build_posterior_samples()
 
-    def _build_inference_mlp(self, input):
+    def _build_inference_mlp(self):
 
-        self.input = input
         self.network.build_graph()
         self.layer_z_mean.build_graph()
         self.layer_z_vars.build_graph()

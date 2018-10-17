@@ -571,7 +571,7 @@ class LDSModel(DynamicalModel):
 
                 with tf.variable_scope('generative_model'):
                     self.gen_net.build_graph(
-                        self.inf_net.post_z_samples, param_dict)
+                        self.inf_net.post_z_samples, lin_preds, param_dict)
 
             else:
 
