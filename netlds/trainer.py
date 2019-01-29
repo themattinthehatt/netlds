@@ -143,7 +143,7 @@ class Trainer(object):
         if 'observations' not in data:
             raise ValueError('must supply observation data')
         if 'inf_input' not in data:
-            raise ValueError('must supply input to inference network')
+            data['inf_input'] = data['observations']
         if 'linear_predictors' not in data:
             data['linear_predictors'] = []
 
@@ -212,7 +212,8 @@ class Trainer(object):
                 model.restore_model(sess, checkpoint_file=checkpoint_file)
 
             # start/resume training
-            self._train_loop(model=model, data=data, sess=sess, indxs=indxs)
+            costs_train, costs_test = self._train_loop(
+                model=model, data=data, sess=sess, indxs=indxs)
 
             # perform final checkpoint if not early stopping (handles on own)
             if self.epochs_ckpt is np.inf and self.early_stop == 0:
@@ -222,6 +223,8 @@ class Trainer(object):
                     sess, checkpoint_file=checkpoint_file, print_filepath=True)
                 # store most recent checkpoint as model attribute
                 model.checkpoint = checkpoint_file
+
+        return costs_train, costs_test
 
     def _train_loop(self, model, data=None, sess=None, indxs=None):
         """Training function for adam optimizer to clean up code in `train`"""
@@ -240,6 +243,18 @@ class Trainer(object):
                 'best_cost': np.inf,
                 'chkpted': False,
                 'stop_training': False}
+
+        # save initial model checkpoint
+        if self.epochs_ckpt:
+            checkpoint_file = os.path.join(self.checkpoints_dir, 'init.ckpt')
+            model.checkpoint_model(
+                sess, checkpoint_file=checkpoint_file, print_filepath=True)
+            # store most recent checkpoint as model attribute
+            model.checkpoint = checkpoint_file
+
+        # store costs throughout training
+        costs_train = []
+        costs_test = []
 
         num_batches = indxs['train'].shape[0] // self.batch_size
 
@@ -273,12 +288,14 @@ class Trainer(object):
             if self.epochs_display is not None and (
                     epoch % self.epochs_display == self.epochs_display - 1
                     or epoch == 0):
-                self._train_print_updates(sess, model, data, indxs, epoch_time)
+                cost_train, cost_test = self._train_print_updates(
+                    sess, model, data, indxs, epoch_time)
+                costs_train.append(cost_train)
+                costs_test.append(cost_test)
 
             # save model checkpoints
             if self.epochs_ckpt is not None and (
-                    epoch % self.epochs_ckpt == self.epochs_ckpt - 1
-                    or epoch == 0):
+                    epoch % self.epochs_ckpt == self.epochs_ckpt - 1):
                 checkpoint_file = os.path.join(
                     self.checkpoints_dir, str('epoch_%05g.ckpt' % epoch))
                 model.checkpoint_model(
@@ -299,13 +316,14 @@ class Trainer(object):
                 if self.early_stop_params['stop_training']:
                     break
 
+        return costs_train, costs_test
+
     def _train_print_updates(
             self, sess, model, data, indxs, epoch_time):
 
-        # cost_train = self._get_cost(
-        #     sess=sess, model=model, data=data, indxs=train_indxs)
-        # cost_train /= len(train_indxs)
-        cost_train = np.nan
+        cost_train = self._get_cost(
+            sess=sess, model=model, data=data, indxs=indxs['train'])
+        cost_train /= len(indxs['train'])
 
         if indxs['test'] is not None:
             cost_test = self._get_cost(
@@ -319,7 +337,7 @@ class Trainer(object):
               'avg test cost = %10.4f' %
               (self.epoch, epoch_time, cost_train, cost_test))
 
-        # print('epoch %04d (%4.2f s)' % (epoch, epoch_time))
+        return cost_train, cost_test
 
     def _train_save_summaries(
             self, sess, model, data, indxs, run_options, run_metadata):

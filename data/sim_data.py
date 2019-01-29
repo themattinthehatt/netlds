@@ -37,27 +37,33 @@ def build_model(
     tf.set_random_seed(tf_seed)
 
     # define model parameters
-    if dim_latent == 2:
-        A = np.array([[1.0, 0.9], [-0.9, 0.01]], dtype=DTYPE)
+    if dim_latent == 1:
+        A = np.array([[0.8]], dtype=DTYPE)
+        z0_mean = np.array([[0.0]], dtype=DTYPE)
+        Q = np.array([[2.0]], dtype=DTYPE)
+        Q_sqrt = np.sqrt(Q)
+    elif dim_latent == 2:
+        A = np.array([[1.0, 0.95], [-0.95, 0.01]], dtype=DTYPE)
         z0_mean = np.array([[0.4, 0.3]], dtype=DTYPE)
+        Q = 0.03 * np.random.randn(dim_latent, dim_latent).astype(DTYPE)
+        Q = np.matmul(Q, Q.T)
+        Q_sqrt = np.linalg.cholesky(Q)
     else:
         A = get_random_rotation_matrix(dim_latent)
         z0_mean = np.random.rand(1, dim_latent).astype(DTYPE)
+        Q = 0.03 * np.random.randn(dim_latent, dim_latent).astype(DTYPE)
+        Q = np.matmul(Q, Q.T)
+        Q_sqrt = np.linalg.cholesky(Q)
 
-    Q = 0.03 * np.random.randn(dim_latent, dim_latent).astype(DTYPE)
-    Q = np.matmul(Q, Q.T)
-    Q_sqrt = np.linalg.cholesky(Q)
-
+    gen_params = {
+        'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt}
     if num_layers == 0:
         C = np.random.randn(dim_latent, dim_obs).astype(DTYPE)
         d = np.abs(np.random.randn(1, dim_obs).astype(DTYPE))
-        gen_params = {
-            'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt,
-            'C': C, 'd': d}
+        gen_params['C'] = C
+        gen_params['d'] = d
         nn_params = None
     else:
-        gen_params = {
-            'A': A, 'z0_mean': z0_mean, 'Q_sqrt': Q_sqrt, 'Q0_sqrt': Q_sqrt}
         nn_params = []
         for i in range(num_layers):
             nn_params.append({
@@ -101,7 +107,7 @@ def build_model(
         gen_model=gen_model, gen_model_params=gen_model_params,
         couple_params=True)
 
-    return model
+    return model, inf_network_params, gen_model_params
 
 
 def build_model_multi(

@@ -152,14 +152,22 @@ class SmoothingLDS(InferenceNetwork):
             tf.transpose(self.r_psi_sqrt, perm=[0, 1, 3, 2]),
             name='precision_diag_data_dep')
 
-        self.AQ0_invA_Q_inv = tf.matmul(
-            tf.matmul(self.A, self.Q0_inv), self.A, transpose_b=True) \
-            + self.Q_inv
-        self.AQ_invA_Q_inv = tf.matmul(
-            tf.matmul(self.A, self.Q_inv), self.A, transpose_b=True) \
-            + self.Q_inv
-        self.AQ0_inv = tf.matmul(-self.A, self.Q0_inv)
-        self.AQ_inv = tf.matmul(-self.A, self.Q_inv)
+        if self.dim_latent > 1:
+            self.AQ0_invA_Q_inv = tf.matmul(
+                tf.matmul(self.A, self.Q0_inv), self.A, transpose_b=True) \
+                + self.Q_inv
+            self.AQ_invA_Q_inv = tf.matmul(
+                tf.matmul(self.A, self.Q_inv), self.A, transpose_b=True) \
+                + self.Q_inv
+            self.AQ0_inv = tf.matmul(-self.A, self.Q0_inv)
+            self.AQ_inv = tf.matmul(-self.A, self.Q_inv)
+        else:
+            self.AQ0_invA_Q_inv = tf.multiply(
+                tf.multiply(self.A, self.Q0_inv), self.A) + self.Q_inv
+            self.AQ_invA_Q_inv = tf.multiply(
+                tf.multiply(self.A, self.Q_inv), self.A) + self.Q_inv
+            self.AQ0_inv = tf.multiply(-self.A, self.Q0_inv)
+            self.AQ_inv = tf.multiply(-self.A, self.Q_inv)
 
         # put together components of precision matrix Sinv in tensor of
         # shape [batch_size, num_time_pts, dim_latent, dim_latent]

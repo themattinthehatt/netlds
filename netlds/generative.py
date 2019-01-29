@@ -266,8 +266,8 @@ class NetFLDS(GenerativeModel):
         else:
             A = tf.get_variable(
                 'A',
-                initializer=0.5 * np.eye(sum(self.dim_latent),
-                                         dtype=self.dtype.as_numpy_dtype()),
+                initializer=0.95 * np.eye(
+                    sum(self.dim_latent), dtype=self.dtype.as_numpy_dtype()),
                 dtype=self.dtype)
 
         # square root of the innovation precision matrix
@@ -305,8 +305,13 @@ class NetFLDS(GenerativeModel):
             sum(self.dim_latent), dtype=self.dtype.as_numpy_dtype),
             name='small_const')
 
-        Q0 = tf.matmul(Q0_sqrt, Q0_sqrt, transpose_b=True, name='Q0') + diag
-        Q = tf.matmul(Q_sqrt, Q_sqrt, transpose_b=True, name='Q') + diag
+        if sum(self.dim_latent) > 1:
+            Q0 = tf.matmul(Q0_sqrt, Q0_sqrt, transpose_b=True, name='Q0') + diag
+            Q = tf.matmul(Q_sqrt, Q_sqrt, transpose_b=True, name='Q') + diag
+        else:
+            Q0 = tf.square(Q0_sqrt, name='Q0') + diag
+            Q = tf.square(Q_sqrt, name='Q') + diag
+
         Q0_inv = tf.matrix_inverse(Q0, name='Q0_inv')
         Q_inv = tf.matrix_inverse(Q, name='Q_inv')
 
@@ -489,13 +494,13 @@ class NetFLDS(GenerativeModel):
 
                 elif self.noise_dist is 'poisson':
                     # expand observation dims over mc samples
-                    obs_y = tf.expand_dims(y[pop], axis=1)
+                    y_obs = tf.expand_dims(y[pop], axis=1)
 
                     # average over batch and mc sample dimensions
                     log_density_ya = tf.reduce_mean(
-                        tf.multiply(obs_y[pop], tf.log(self.y_pred[pop]))
+                        tf.multiply(y_obs[pop], tf.log(1e-3 + self.y_pred[pop]))
                         - self.y_pred[pop]
-                        - tf.lgamma(1 + obs_y[pop]),
+                        - tf.lgamma(1 + y_obs[pop]),
                         axis=[0, 1])
 
                     # sum over time and observation dimensions

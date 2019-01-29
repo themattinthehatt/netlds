@@ -1,6 +1,7 @@
 """Model class for building models"""
 
 import os
+import datetime
 import numpy as np
 import tensorflow as tf
 from netlds.generative import *
@@ -11,6 +12,9 @@ from netlds.trainer import Trainer
 class Model(object):
     """Base class for models"""
 
+    # meta data
+    date = str(datetime.datetime.now())
+    version = '2018-11'
     # use same data type throughout graph construction
     dtype = tf.float32
 
@@ -77,7 +81,9 @@ class Model(object):
         See Trainer.train for input options
         """
 
-        self.trainer.train(self, **kwargs)
+        costs_train, costs_test = self.trainer.train(self, **kwargs)
+
+        return costs_train, costs_test
 
     def sample(
             self, ztype='prior', num_samples=1, seed=None,
